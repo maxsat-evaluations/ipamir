@@ -124,28 +124,31 @@ IPAMIR_API void ipamir_add_soft_lit (void * solver, int32_t lit, uint64_t weight
 IPAMIR_API void ipamir_assume (void * solver, int32_t lit);
 
 /**
- * Solve the MaxSAT instance with specified hard clauses and soft literals
- * under the specified assumptions.
+ * Solve the MaxSAT instance, as defined by previous calls to 'ipamir_add_hard'
+ * and 'ipamir_add_soft_lit', under the assumptions specified by previous calls
+ * to 'ipamir_assume' since the last call to 'ipamir_solve'.
  * 
- * A solution is an assigment that satisfies the hard clauses and assumptions.
- * An optimal solution is a solution which minimizes the sum of weights of soft
- * literals set to true.
+ * A feasible solution is an assignment that satisfies the hard clauses and
+ * assumptions. An optimal solution is a solution which minimizes the sum of
+ * weights of soft literals set to true.
  * 
- * If no solution exists, the function returns 10 and the state of the solver
- * is changed to UNSAT.
+ * Return one of the following:
  * 
- * If the search is interrupted (see 'ipamir_set_terminate') and a solution is
- * found, the function returns 20 and the state of the solver is changed to SAT.
+ * 0 -- If the search is interrupted and no feasible solution has yet been
+ * found. The state of the solver is set to INPUT. Note that the solver can only
+ * be interrupted via 'ipamir_set_terminate'.
  * 
- * If an optimal solution is found, the function returns 30 and the state of
- * the solver is changed to OPTIMAL.
+ * 10 -- If no feasible solution exists. The state of the solver is changed to
+ * UNSAT.
  * 
- * If 'ipamir_add_hard', 'ipamir_add_soft_lit', or 'ipamir_assume' has been
- * called and the solver does not support this action, the function returns 40
- * and the state of the solver is set to ERROR.
+ * 20 -- If the search is interrupted but a feasible solution has been found
+ * before the interrupt occurs. The state of the solver is changed to SAT.
  * 
- * If the search is interrupted (see ipamir_set_terminate) and no solution is
- * found, the function returns 0 and the state of the solver is set to INPUT.
+ * 30 -- If an optimal solution is found. The state of the solver is changed to
+ * OPTIMAL.
+ * 
+ * 40 -- If the solver is in state ERROR. The solver enters this state if a
+ * sequence of ipamir calls have been made that the solver does not support.
  * 
  * This function can be called in any defined state of the solver. Note that
  * the state of the solver _during_ execution of 'ipamir_solve' is undefined.
