@@ -138,11 +138,11 @@ IPAMIR_API void ipamir_assume (void * solver, int32_t lit);
  * found. The state of the solver is set to INPUT. Note that the solver can only
  * be interrupted via 'ipamir_set_terminate'.
  * 
- * 10 -- If no feasible solution exists. The state of the solver is changed to
- * UNSAT.
- * 
- * 20 -- If the search is interrupted but a feasible solution has been found
+ * 10 -- If the search is interrupted but a feasible solution has been found
  * before the interrupt occurs. The state of the solver is changed to SAT.
+ * 
+ * 20 -- If no feasible solution exists. The state of the solver is changed to
+ * UNSAT.
  * 
  * 30 -- If an optimal solution is found. The state of the solver is changed to
  * OPTIMAL.

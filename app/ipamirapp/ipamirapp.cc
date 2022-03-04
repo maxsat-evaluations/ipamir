@@ -37,6 +37,14 @@ bool initialize_solver(void * solver, int32_t & n_vars,
         }
     }
 
+    n_vars = 0;
+    for (auto const &clause : hard_clauses)
+        for (auto lit : clause)
+            n_vars = max(n_vars, abs(lit));
+    for (auto const &[weight, clause] : soft_clauses)
+        for (auto lit : clause)
+            n_vars = max(n_vars, abs(lit));
+
     // add hard clauses via api
     for (auto const &clause : hard_clauses) {
         for (auto lit : clause)
@@ -66,7 +74,7 @@ bool initialize_solver(void * solver, int32_t & n_vars,
 int32_t solve_and_print_result(void * solver, int32_t n_vars)
 {
     int32_t res = ipamir_solve(solver);
-    if (res == 10)
+    if (res == 20)
         cout << "s UNSATISFIABLE\n";
     else if (res == 30) {
         cout << "s OPTIMUM FOUND\n";
