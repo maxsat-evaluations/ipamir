@@ -24,7 +24,8 @@ CFLAGS ?= -Wall -DNDEBUG -O3 -std=c++17
 
 DEPS = ../../maxsat/$(IPAMIRSOLVER)/libipamir$(IPAMIRSOLVER).a
 LIBS = -L../../maxsat/$(IPAMIRSOLVER)/ -lipamir$(IPAMIRSOLVER)
-LIBS += $(shell cat ../../sat/$(IPASIRSOLVER)/LIBS 2>/dev/null)
+LIBS += $(shell cat ../../maxsat/$(IPAMIRSOLVER)/LIBS 2>/dev/null)
+LIBS += $(shell cat ../../maxsat/$(IPASIRSOLVER)/LIBS 2>/dev/null)
 LINK=$(CC)
 
 #--------------------------------------------------------------------------#

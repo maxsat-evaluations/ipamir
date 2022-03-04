@@ -13,9 +13,6 @@ extern "C" {
 bool initialize_solver(void * solver, int32_t & n_vars,
                        vector<int32_t> & soft_lits, string filename) {
     ifstream wcnf(filename);
-    int32_t vars = 0;
-    uint64_t clauses = 0;
-    uint64_t top = 0;
     string line;
     vector<vector<int32_t>> hard_clauses;
     vector<pair<uint64_t,vector<int32_t>>> soft_clauses;
@@ -23,18 +20,8 @@ bool initialize_solver(void * solver, int32_t & n_vars,
     // parse wcnf
     while (getline(wcnf, line)) {
         if (line[0] == 'c') continue;
-        if (line[0] == 'p') {
-            istringstream iss(line);
-            string tmp;
-            if (!(iss >> tmp) || tmp != "p") return false;
-            if (!(iss >> tmp) || tmp != "wcnf") return false;
-            if (!(iss >> vars >> clauses >> top)) return false;
-            continue;
-        }
-        if (!vars || !clauses || !top) return false;
         istringstream iss(line);
-        uint64_t weight;
-        if (!(iss >> weight)) return false;
+        string hard; iss >> hard;
         vector<int32_t> clause;
         int32_t lit;
         while (iss >> lit)
@@ -42,29 +29,13 @@ bool initialize_solver(void * solver, int32_t & n_vars,
         int32_t tmp = clause.back();
         if (tmp) return false;
         clause.pop_back();
-        if (weight == top)
+        if (hard == "h")
             hard_clauses.push_back(clause);
-        else
+        else {
+            uint64_t weight = stoull(hard);
             soft_clauses.push_back(make_pair(weight, clause));
+        }
     }
-
-    // check p-line information
-    n_vars = 0;
-    uint64_t sum_weights = 0;
-    for (auto const &clause : hard_clauses)
-        for (auto lit : clause)
-            n_vars = max(n_vars, abs(lit));
-    for (auto const &[weight, clause] : soft_clauses) {
-        sum_weights += weight;
-        for (auto lit : clause)
-            n_vars = max(n_vars, abs(lit));
-    }
-    if (n_vars != vars)
-        cout << "c WARNING: number of variables does not match p-line.\n";
-    if (hard_clauses.size() + soft_clauses.size() != clauses)
-        cout << "c WARNING: number of clauses does not match p-line.\n";
-    if (top <= sum_weights)
-        cout << "c WARNING: sum of weights of soft clauses >= top.\n";
 
     // add hard clauses via api
     for (auto const &clause : hard_clauses) {
@@ -95,7 +66,7 @@ bool initialize_solver(void * solver, int32_t & n_vars,
 int32_t solve_and_print_result(void * solver, int32_t n_vars)
 {
     int32_t res = ipamir_solve(solver);
-    if (res == 20)
+    if (res == 10)
         cout << "s UNSATISFIABLE\n";
     else if (res == 30) {
         cout << "s OPTIMUM FOUND\n";
@@ -109,6 +80,14 @@ int32_t solve_and_print_result(void * solver, int32_t n_vars)
 }
 
 int main(int argc, char **argv) {
+    if (argc < 2) {
+        cout << "USAGE: ./ipamirapp <input_file_name>\n\n";
+        cout << "where <input_file_name> is a MaxSAT instance as specified in the MaxSAT evaluation 2022 rules:\n";
+        cout << "https://maxsat-evaluations.github.io/2022/rules.html (Input and Output Requirements)\n\n";
+        cout << "See ./inputs for example input files.\n";
+        return 1;
+    }
+
     void * solver = ipamir_init();
     srand(2022);
     int32_t n_vars = 0;
