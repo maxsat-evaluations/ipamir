@@ -116,8 +116,11 @@ int main(int argc, char **argv) {
     // block two optimal solutions
     int32_t blocked_sols = 2;
     for (int32_t i = 0; i < blocked_sols; i++) {
+        vector<int32_t> sol;
         for (int32_t var = 1; var <= n_vars; var++)
-            ipamir_add_hard(solver, -ipamir_val_lit(solver, var));
+            sol.push_back(ipamir_val_lit(solver, var));
+        for (int32_t val : sol)
+            ipamir_add_hard(solver, -val);
         ipamir_add_hard(solver, 0);
         res = solve_and_print_result(solver, n_vars);
         if (res == 20) {
