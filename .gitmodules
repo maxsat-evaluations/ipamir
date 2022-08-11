@@ -1,0 +1,4 @@
+[submodule "maxsat/incremental-maxhs"]
+	path = maxsat/incremental-maxhs
+	url = https://bitbucket.org/coreo-group/incremental-maxhs
+	branch = mse22
