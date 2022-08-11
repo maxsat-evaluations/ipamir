@@ -60,8 +60,12 @@ libipasir$(SIG).a: .FORCE
 	@#
 	@# patch verbose output
 	@#
-	sed -i -e 's,"\([=|]\),"c [${SIG}] \1,' $(DIR)/minisat/core/Main.cc
-	sed -i -e 's,"\([=|]\),"c [${SIG}] \1,' $(DIR)/minisat/core/Solver.cc
+	#sed -i -e 's,"\([=|]\),"c [${SIG}] \1,' $(DIR)/minisat/core/Main.cc
+	#sed -i -e 's,"\([=|]\),"c [${SIG}] \1,' $(DIR)/minisat/core/Solver.cc
+	@#
+	@# rename namespace
+	@#
+	find minisat-220 -type f -exec sed -i 's/Minisat/IPAsirMinisat/g' {} \;
 	@#
 	@# configure and build library
 	@#

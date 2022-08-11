@@ -15,7 +15,7 @@
 #include <climits>
 
 using namespace std;
-using namespace Minisat;
+using namespace IPAsirMinisat;
 
 extern "C" {
 static const char * sig = "minisat" VERSION;
@@ -54,7 +54,7 @@ public:
   IPAsirMiniSAT () : szfmap (0), fmap (0), nomodel (false), calls (0) {
     // MiniSAT by default produces non standard conforming messages.
     // So either we have to set this to '0' or patch the sources.
-    verbosity = 1;
+    verbosity = 0;
   }
   ~IPAsirMiniSAT () { reset (); }
   void add (int32_t lit) {
@@ -113,7 +113,7 @@ extern "C" {
 static IPAsirMiniSAT * import (void * s) { return (IPAsirMiniSAT*) s; }
 const char * ipasir_signature () { return sig; }
 void * ipasir_init () { return new IPAsirMiniSAT (); }
-void ipasir_release (void * s) { import (s)->stats (); delete import (s); }
+void ipasir_release (void * s) { /*import (s)->stats ();*/ delete import (s); }
 int ipasir_solve (void * s) { return import (s)->solve (); }
 void ipasir_add (void * s, int32_t l) { import (s)->add (l); }
 void ipasir_assume (void * s, int32_t l) { import (s)->assume (l); }
