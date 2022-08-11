@@ -1,0 +1,3500 @@
+#include "core.hpp"
+
+#include <list>
+
+namespace quantom {
+
+  // Simplifies the current CNF formula by performing some preprocessing steps.
+  // Returns 20, if formula is unsatisfiable,
+  // otherwise 0 will be returned.
+  unsigned int Core::preprocess ( void )
+  {
+	// If the solver is not on decision level 0, we might have a problem.
+	assert(m_decisionLevel == 0);
+
+#ifdef PREDEBUG
+	printdatabase();
+#endif
+
+	double timeC(0.0);
+	struct rusage resources;
+	getrusage(RUSAGE_SELF, &resources);
+	double timeS = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+	m_control->setStartTime(timeS);
+	
+	preparePreprocessing();
+
+	unsigned int loops(0);
+	bool doitagain(true); 
+	bool exitprepro(false);
+	
+	// indicates whether something changes since last call of a sub method
+	// didsomething& 0x1 = did something in fastprocess
+	// didsomething& 0x2 = did something in subsumption
+	// didsomething& 0x4 = did something in upla
+	// didsomething& 0x8 = did something in variable elimination
+	// didsomething&0x10 = did something in quantifier merge
+	// didsomething&0x20 = flag for marking the first prepro loop
+	unsigned int didsomething( 0x3f );
+
+	unsigned int t_cons(q_cons);
+	unsigned int t_equiv(q_equiv);
+	unsigned int t_uplacons(q_uplacons);
+	unsigned int t_uplaequiv(q_uplaequiv);
+	unsigned int t_reslits(q_reslits);
+	unsigned int t_monolits(q_monolits);
+	unsigned int t_dclits(q_dclits);
+	unsigned int t_subsumptions(q_subsumptions);
+	unsigned int t_selfsubsumptions(q_selfsubsumptions);
+	unsigned int t_deletedLevels(q_deletedLevels);
+	unsigned int t_mergedLevels(q_mergedLevels);
+	unsigned int t_unitprop(q_unitprop);
+
+	bool fast(q_dsPropIndex != m_dsEndIndex);
+	if( !propagateUnits(true) ) 
+	  { 
+		if( m_control->getVerbosity() > 2 )
+		  { std::cout << "c preprocessor: UNSAT in initial unit propagation" << std::endl; }
+		m_control->setDone(); 
+		return QUANTOM_UNSAT; 
+	  }
+	if( !fastPreprocess(fast) ) 
+	  { 
+	if( m_control->getVerbosity() > 2 )
+	  { std::cout << "c preprocessor: UNSAT after initial unit propagation" << std::endl; }
+		m_control->setDone(); 
+		return QUANTOM_UNSAT; 
+	  }
+	doitagain = fast; 
+
+	// clear fastpreprocess part
+	didsomething &= 0x3e;
+
+	do {
+	  do {
+		++loops;
+		doitagain = false;
+
+		// clear upla part
+		didsomething &= 0x3b;
+		if( q_upla )
+		  {
+			// no changes since last upla? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+			if( !upla(didsomething) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in UPLA" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			bool fast = (didsomething&0x4);
+			if( !fastPreprocess( fast ) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after UPLA" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			
+			doitagain |= fast;
+		  }
+  
+		// clear variable elimination part
+		didsomething &= 0x37;
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		//std::cout << "timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in preprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		if( q_varelim )
+		  {
+			// no changes since last variable elimination? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+
+			if( !variableElimination(didsomething) ) 
+			  { 
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in variable Elimination" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+
+			bool fast = (didsomething&0x8);
+			if( !fastPreprocess( fast ) ) 
+			  { 
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after variable Elimination" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			doitagain |= fast;
+		  }
+
+		// clear subsumption part
+		didsomething &= 0x3d;
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		//std::cout << "timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in preprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		if( q_subsumption )
+		  {
+			// no changes since last subsumption? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+			if( !subsumptionCheck(didsomething) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in Subsumption" << std::endl; }
+				m_control->setDone(); return QUANTOM_UNSAT; }
+			bool fast = (didsomething&0x2);
+			if( !fastPreprocess( fast ) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after Subsumption" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			doitagain |= fast; 
+		  }
+
+		// clear quantifier merge part part
+		didsomething &= 0x2f;
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in preprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		/* TODO*/
+		if( q_quantmerge )
+		  {
+			// no changes since last quantifier merge? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+			if( !mergeQuantLevel(didsomething) ) { m_control->setDone(); return QUANTOM_UNSAT; }
+			bool fast = (didsomething&0x10);
+			if( !fastPreprocess(fast) ) { m_control->setDone(); return QUANTOM_UNSAT; }
+			doitagain |= fast;
+		  }
+
+		if( q_maxqlevel < 3 ) 
+		  {
+			bool fast( false );
+			if( !detectMonotone(fast) ) 
+			  { 
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in Monotone Literal Detection" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			exitprepro = true;
+			break;
+		  }
+
+#ifdef PREDEBUG
+		printdatabase();
+#endif
+		// clear "first loop" flag
+		didsomething &= 0x1f;
+
+	  } while( doitagain && !m_control->done() );
+
+	  doitagain = false;
+	  unsigned int post = postProcess(doitagain, false);
+
+	  if (post != QUANTOM_UNKNOWN )
+		{ return post; }
+
+	} while( !exitprepro && doitagain );
+
+	if( m_control->getVerbosity() > 0 )
+	  {
+		std::cout << "c overall prepro stats  : " << std::endl
+				  << "c prepro loops          : " << loops << std::endl
+				  << "c binary constants      : " << (q_cons - t_cons) << " (" << q_cons << ")" <<std::endl
+				  << "c binary equivalances   : " << (q_equiv - t_equiv) << " (" << q_equiv << ")" << std::endl
+				  << "c upla constants        : " << (q_uplacons - t_uplacons) << " (" << q_uplacons << ")" <<  std::endl
+				  << "c upla equivalances     : " << (q_uplaequiv - t_uplaequiv) << " (" << q_uplaequiv << ")" <<  std::endl
+				  << "c eliminated variables  : " << (q_reslits - t_reslits) << " (" << q_reslits << ")" <<  std::endl
+				  << "c monotone literals     : " << (q_monolits - t_monolits) << " (" << q_monolits << ")" <<  std::endl
+				  << "c dc literals           : " << (q_dclits - t_dclits) << " (" << q_dclits << ")" <<  std::endl
+				  << "c subsumed clauses      : " << (q_subsumptions - t_subsumptions) << " (" << q_subsumptions << ")" <<  std::endl
+				  << "c selfsubsumed literals : " << (q_selfsubsumptions - t_selfsubsumptions) << " (" << q_selfsubsumptions << ")" <<  std::endl
+				  << "c deleted quant levels  : " << (q_deletedLevels - t_deletedLevels) << " (" << q_deletedLevels << ")" << std::endl
+				  << "c merged quant levels   : " << (q_mergedLevels - t_mergedLevels) << " (" << q_mergedLevels << ")" << std::endl
+				  << "c max quant level       : " << q_maxqlevel << std::endl
+				  << "c unit propagations     : " << (q_unitprop - t_unitprop) << " (" << q_unitprop << ")" <<  std::endl << std::endl;
+	  }
+		
+#ifdef PREDEBUG
+	printdatabase();
+#endif
+
+	assert(checkAllClauses());
+
+	// Everything went fine.
+	return QUANTOM_UNKNOWN;
+  }
+
+  // Simplifies the current CNF formula by performing some preprocessing steps.
+  // Returns 20, if formula is unsatisfiable,
+  // Returns 10, if formula is satisfiable,
+  // otherwise 0 will be returned.
+  unsigned int Core::inprocess ( void )
+  {
+	// If the solver is not on decision level 0, we might have a problem.
+	assert(m_decisionLevel == 0);
+
+	++q_inprocessings;
+	if( m_control->getVerbosity() > 1 )
+	  { std::cout << "c Inprocessing No. " << q_inprocessings << std::endl; }
+
+	double timeC(0.0);
+	struct rusage resources;
+
+	unsigned int loops(0);
+	bool doitagain( true ); 
+	bool exitinpro( false );
+
+	// indicates whether something changes since last call of a sub method
+	// didsomething& 0x1 = did something in fastprocess
+	// didsomething& 0x2 = did something in subsumption
+	// didsomething& 0x4 = did something in upla
+	// didsomething& 0x8 = did something in variable elimination
+	// didsomething&0x10 = did something in quantifier merge
+	// didsomething&0x20 = flag for marking the first prepro loop
+	unsigned int didsomething( 0x2f );
+
+	prepareInprocessing();
+
+#ifdef PREDEBUG
+	printdatabase();
+#endif
+
+	unsigned int t_cons(q_cons);
+	unsigned int t_equiv(q_equiv);
+	unsigned int t_uplacons(q_uplacons);
+	unsigned int t_uplaequiv(q_uplaequiv);
+	unsigned int t_reslits(q_reslits);
+	unsigned int t_monolits(q_monolits);
+	unsigned int t_dclits(q_dclits);
+	unsigned int t_subsumptions(q_subsumptions);
+	unsigned int t_selfsubsumptions(q_selfsubsumptions);
+	unsigned int t_deletedLevels(q_deletedLevels);
+	unsigned int t_mergedLevels(q_mergedLevels);
+	unsigned int t_unitprop(q_unitprop);
+
+	bool fast(q_dsPropIndex != m_dsEndIndex);
+	if( !propagateUnits() ) 
+	  { 
+		if( m_control->getVerbosity() > 2 )
+		  { std::cout << "c preprocessor: UNSAT in initial unit propagation" << std::endl; }
+		m_control->setDone(); 
+		return QUANTOM_UNSAT; 
+	  }
+	if( !fastPreprocess(fast) )
+	  { 
+		if( m_control->getVerbosity() > 2 )
+		  { std::cout << "c preprocessor: UNSAT after initial unit propagation" << std::endl; }
+		m_control->setDone(); 
+		return QUANTOM_UNSAT; 
+	  }
+
+	// clear fastpreprocess part
+	didsomething &= 0x3e;
+
+	do {
+	  do {
+		++loops;
+	  
+		doitagain = false;
+
+		// clear upla part
+		didsomething &= 0x3b;
+
+		if( q_upla && ( (q_inprocessings & 0xf) == 1 ) )
+		  {
+			// no changes since last upla? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+
+			if( !upla(didsomething) )
+			  { 
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in UPLA" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			bool fast = (didsomething&0x4);
+			if( !fastPreprocess( fast ) )
+			  { 
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after UPLA" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			doitagain |= fast; 
+		  }
+  
+		// clear variable elimination part
+		didsomething &= 0x37;
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in inprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		if( q_varelim )
+		  {
+			// no changes since last variable elimination? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+
+			if( !variableElimination(didsomething) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in variable Elimination" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			bool fast = (didsomething&0x8);
+			if( !fastPreprocess( fast ) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after variable Elimination" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			doitagain |= fast; 
+		  }
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in inprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		// clear subsumption part
+		didsomething &= 0x3d;
+
+		if( q_subsumption )
+		  {
+			// no changes since last subsumption? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+
+			if( !subsumptionCheck(didsomething /*, false*/) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in Subsumption" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			bool fast = (didsomething&0x2);
+			if( !fastPreprocess( fast ) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT after Subsumption" << std::endl; }
+				m_control->setDone(); 
+				return QUANTOM_UNSAT; 
+			  }
+			doitagain |= fast; 
+		  }
+
+		// clear quantifier merge part
+		didsomething &= 0x2f;
+
+		getrusage(RUSAGE_SELF, &resources); 
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			std::cout << "c timeout in inprocessor, start time: " << m_control->getStartTime() << " current time: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			unsigned int post = postProcess(doitagain, false);
+			
+			if (post != QUANTOM_UNKNOWN )
+			  { return post; }
+			return QUANTOM_UNKNOWN;
+		  }
+
+		if( q_quantmerge )
+		  {
+			// no changes since last quantifier merge? -> end loop
+			if( didsomething == 0 )
+			  { break; }
+			if( !mergeQuantLevel(didsomething) ) { m_control->setDone(); return QUANTOM_UNSAT; }
+			bool fast = (didsomething&0x10);
+			if( !fastPreprocess( fast ) ) { m_control->setDone(); return QUANTOM_UNSAT; }
+			doitagain |= fast; 
+		  }
+
+		if( q_maxqlevel < 3 ) 
+		  {			
+			bool fast( false );
+			if( !detectMonotone(fast) ) 
+			  {
+				if( m_control->getVerbosity() > 2 )
+				  { std::cout << "c preprocessor: UNSAT in Monotone Literal Detection" << std::endl; }
+				m_control->setDone();
+				return QUANTOM_UNSAT; 
+			  }
+			exitinpro = true;
+			break;
+		  }
+
+#ifdef PREDEBUG
+		printdatabase();
+#endif
+
+		// clear "first loop" flag
+		didsomething &= 0x1f;
+
+	  } while( doitagain );
+
+	  doitagain = false;
+	  unsigned int post = postProcess(doitagain, true);
+	  if( post != QUANTOM_UNKNOWN )
+		{ return post; }
+
+	} while( !exitinpro && doitagain );
+
+	if( m_control->getVerbosity() > 0 )
+	  { 				 
+		std::cout << "c overall inpro stats  : " << std::endl
+				  << "c inpro loops          : " << loops << std::endl
+				  << "c binary constants      : " << (q_cons - t_cons) << " (" << q_cons << ")" <<std::endl
+				  << "c binary equivalances   : " << (q_equiv - t_equiv) << " (" << q_equiv << ")" << std::endl
+				  << "c upla constants        : " << (q_uplacons - t_uplacons) << " (" << q_uplacons << ")" <<  std::endl
+				  << "c upla equivalances     : " << (q_uplaequiv - t_uplaequiv) << " (" << q_uplaequiv << ")" <<  std::endl
+				  << "c eliminated variables  : " << (q_reslits - t_reslits) << " (" << q_reslits << ")" <<  std::endl
+				  << "c monotone literals     : " << (q_monolits - t_monolits) << " (" << q_monolits << ")" <<  std::endl
+				  << "c dc literals           : " << (q_dclits - t_dclits) << " (" << q_dclits << ")" <<  std::endl
+				  << "c subsumed clauses      : " << (q_subsumptions - t_subsumptions) << " (" << q_subsumptions << ")" <<  std::endl
+				  << "c selfsubsumed literals : " << (q_selfsubsumptions - t_selfsubsumptions) << " (" << q_selfsubsumptions << ")" <<  std::endl
+				  << "c deleted quant levels  : " << (q_deletedLevels - t_deletedLevels) << " (" << q_deletedLevels << ")" << std::endl
+				  << "c merged quant levels   : " << (q_mergedLevels - t_mergedLevels) << " (" << q_mergedLevels << ")" << std::endl
+				  << "c max quant level       : " << q_maxqlevel << std::endl
+				  << "c unit propagations     : " << (q_unitprop - t_unitprop) << " (" << q_unitprop << ")" <<  std::endl << std::endl;
+	  }
+
+	assert(checkAllClauses());
+
+	return QUANTOM_UNKNOWN;
+  }
+
+  bool Core::fastPreprocess( bool& didsomething )
+  {
+	if( !didsomething ) { return true; }
+	if( !detectMonotone(didsomething) ) { return false; }
+	if( !findBinaryConsAndEquiv(didsomething) ) { return false; }
+
+	return true;
+  }
+
+  void Core::preparePreprocessing( void )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	m_clauselength = 0;
+	for( unsigned int c = 0; c != m_clauseDatabase.size(); ++c )
+	  {
+		m_clauseDatabase[c]->sort();
+		m_clauseDatabase[c]->litlist.clear();
+	  }
+  }
+
+
+  void Core::prepareInprocessing( void )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// Build occurence lists for learned clauses
+	m_clauselength = 0;
+	size_t size = m_clauseDatabase.size();
+	for( unsigned int c = 0; c != size; ++c )
+	  {
+		// Get a pointer to the next clause.
+		pointToClause* clause(m_clauseDatabase[c]);
+
+		assert( clause->lbd() != 0 );
+		
+		clause->sort();
+		m_clauselength += clause->size();
+
+		clause->litlist.clear();
+
+		if( clause->lbd() == 1 )
+		  { continue; }
+
+		// Update occurence lists for learned clauses
+		unsigned int* lits(clause->clause());
+		
+		assert( lits[0] != 0 );
+
+		unsigned int p(0);
+		while( lits[p] != 0 )
+		  {
+			q_occur[Lit(lits[p])].push_back(clause);
+			++p;
+		  }
+	  }
+
+  }
+
+
+  // 1. Delete satisfied cubes in inprocessing
+  // 2. Refresh occurence list in inprocessing
+  // 3. Sort clausescubes for solving
+  // 4. Update Watchlist
+  // 5. Update litlits of clauses for pure detection
+  // 6. Update variable order lists if we have merged quantification levels
+  unsigned int Core::postProcess( bool& doitagain, bool inprocess )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int cubelength(0);
+	unsigned int staticclauselength(0);
+	unsigned int dynamicclauselength(0);
+
+	unsigned int t_literals = m_literals;
+	unsigned int t_clauses = m_clauses;
+	unsigned int t_clausesBinary = m_clausesBinary;
+	unsigned int t_clausesStatic = m_clausesStatic;
+	unsigned int t_clausesStaticBinary = m_clausesStaticBinary;
+	unsigned int t_clausesDynamic = m_clausesDynamic;
+	unsigned int t_clausesDynamicBinary = m_clausesDynamicBinary;
+	unsigned int t_cubes = m_cubes;
+
+#ifndef NDEBUG
+	struct rusage resources;
+	getrusage(RUSAGE_SELF, &resources); 
+	double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+#endif
+
+	assert( inprocess || q_solutionDatabase.empty() || ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) ) );
+
+	// proceed cubes and delete assigned literals/cubes
+	unsigned int csize( q_solutionDatabase.size() );
+	for( unsigned int c = 0 ; c != csize; ++c )
+	  {
+		pointToClause* cube( q_solutionDatabase[c] );
+		unsigned int* lits( cube->clause() );
+		unsigned int pos( 0 );
+		unsigned int qos( 0 );
+		unsigned int maxulevel( 0 );
+		bool deleted(false);
+		unsigned long long sign(0);
+
+#ifdef PREDEBUG
+		printClause(cube);
+#endif
+				
+		while(lits[pos] != 0 )
+		  {
+			// Cube is satisfied? -> delete cube 
+			if( q_deleted[Lit(lits[pos])>>1] || m_assignment[Lit(lits[pos])] )
+			  {
+#ifdef PREDEBUG
+				std::cout << "removecube" << std::endl;
+#endif
+				m_openIDs.push_back(q_solutionDatabase[c]->id());
+				delete q_solutionDatabase[c];
+				q_solutionDatabase[c--] = q_solutionDatabase[--csize];
+				q_solutionDatabase.pop_back();
+				deleted = true;
+				break;
+			  }
+			// Literal can be removed?
+			else if ( m_assignment[Lit(lits[pos])^1] ||
+					  (!isUniversal(lits[pos]) && q_level[Lit(lits[pos])>>1] > maxulevel ) 
+					  )
+			  {
+#ifdef PREDEBUG
+				std::cout << "remove " << getLit(lits[pos]) << std::endl;
+#endif
+				// Should we perform forall/exist reduction 
+				if( isUniversal(lits[pos]) )
+				  {
+					cube->setFAQ(cube->faq()-1);
+				  }
+			  }
+			else
+			  {
+				lits[qos] = lits[pos];
+				sign |= 1ULL << ( (lits[qos]>>1) % 64);
+				++qos;
+				
+				if( isUniversal(lits[pos]) && ( maxulevel < q_level[Lit(lits[pos])>>1] ) )
+				  { maxulevel = q_level[Lit(lits[pos])>>1]; }
+			  }
+			++pos;
+		  }
+
+		if( deleted )
+		  { continue; }
+
+		lits[qos] = 0;
+
+		if( qos == 0 )
+		  { return QUANTOM_SAT; }
+		else if ( qos == 1 )
+		  {
+#ifdef PREDEBUG
+			std::cout << "receive unit" << std::endl;               
+#endif
+
+			if( !isUniversal(lits[0]) || m_assignment[Lit(lits[0])^1] )
+			  { return false; }
+			
+			if( !m_assignment[lits[0]] )
+			  { addImplication( lits[0], NULL ); }
+			doitagain = true;
+			cube->setLBD(0);
+			continue;
+		  }
+
+		cube->setSize(qos);
+		cubelength += qos;
+		cube->setSign(sign);
+
+		assert( cube->faq() <= cube->size() );
+
+		if( cube->lbd() > qos )
+		  { cube->setLBD( qos ); }
+	  }
+
+	if( !propagateUnits() )
+	  { return QUANTOM_UNSAT; }
+	
+	if( doitagain )
+	  { return QUANTOM_UNKNOWN; }
+	
+	if( inprocess )
+	  {
+		// Delete all occurence lists
+		for( unsigned int v = 1; v <= m_variables; ++v )
+		  {
+			std::vector< pointToClause* >().swap(q_occur[v << 1]); 
+			std::vector< pointToClause* >().swap(q_occur[(v << 1) ^ 1]); 		
+			
+			// clear last solution cube
+			q_solutioncube[v] = 0;
+		  }
+	
+		// Sort clauses for solving and update occurence lists
+		for( unsigned int c = 0; c != m_clauseDatabase.size(); ++c )
+		  {
+			sortsolve( m_clauseDatabase[c] );
+			assert( m_clauseDatabase[c] != NULL );
+			assert( m_clauseDatabase[c]->clause() != NULL );
+			assert( m_clauseDatabase[c]->clause()[0] != 0 );
+			assert( m_clauseDatabase[c]->lbd() != 0 );
+
+			// Update occurences
+			if( m_clauseDatabase[c]->lbd() == 1 )
+			  {
+				staticclauselength += m_clauseDatabase[c]->size();
+				if( inprocess )
+				  {
+					unsigned int* clause( m_clauseDatabase[c]->clause() );
+					unsigned int pos(0);
+					while( clause[pos] != 0 )
+					  {
+						q_occur[Lit(clause[pos])].push_back( m_clauseDatabase[c] );
+						++pos;
+					  }
+				
+					// Delete litlists
+					m_clauseDatabase[c]->litlist.clear();
+				  }
+			  }
+			// adjust "lbd" value 
+			else 
+			  {
+				dynamicclauselength += m_clauseDatabase[c]->size();
+				if ( m_clauseDatabase[c]->lbd() > m_clauseDatabase[c]->size() )
+				  { 
+					m_clauseDatabase[c]->setLBD( m_clauseDatabase[c]->size() ); 
+				  }
+			  }
+		  }	
+		
+		// Setup litlists without checking of monotones
+		setupLitLists(false);
+		updateVarorder();
+	  }
+
+	updateWatches();
+
+	if( inprocess && ( m_control->getVerbosity() > 0 ) )
+	  {
+		std::cout << "c resume solving with" << std::endl
+				  << "#variables................: " << m_literals             << " (" << t_literals             << ")" << std::endl
+				  << "#static binary clauses....: " << m_clausesStaticBinary  << " (" << t_clausesStaticBinary  << ")" << std::endl
+				  << "#static clauses...........: " << m_clausesStatic        << " (" << t_clausesStatic        << ")" << std::endl;
+		if( (m_clausesStatic-m_clausesStaticBinary) != 0 )
+		  {
+			std::cout << "avg static clause length..: " << ((double)staticclauselength/(double)(m_clausesStatic-m_clausesStaticBinary)) << std::endl;
+		  }
+		std::cout << "#dynamic binary clauses...: " << m_clausesDynamicBinary << " (" << t_clausesDynamicBinary << ")" << std::endl
+				  << "#dynamic clauses..........: " << m_clausesDynamic       << " (" << t_clausesDynamic       << ")" << std::endl;
+		if( (m_clausesDynamic-m_clausesDynamicBinary) != 0 )
+		  {
+			std::cout << "avg dynamic clause length.: " << ((double)dynamicclauselength/(double)(m_clausesDynamic-m_clausesDynamicBinary)) << std::endl;
+		  }
+		std::cout << "#binary clauses...........: " << m_clausesBinary        << " (" << t_clausesBinary        << ")" << std::endl 
+				  << "#clauses..................: " << m_clauses              << " (" << t_clauses              << ")" << std::endl;
+		if( (m_clauses-m_clausesBinary) != 0 )
+		  {
+			std::cout << "#avg clauses length  .....: " << ((double)(staticclauselength+dynamicclauselength)/(double)(m_clauses-m_clausesBinary)) << std::endl;
+		  }
+		std::cout << "#cubes....................: " << m_cubes                <<" (" << t_cubes                 << ")" << std::endl;
+		if( m_cubes != 0 )
+		  {
+			std::cout << "avg cube length...........: " << ((double)cubelength/(double)m_cubes)   << std::endl;
+		  }
+	  }
+
+	return QUANTOM_UNKNOWN;
+  }
+
+  void Core::updateWatches( void )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	m_literals = 0;
+	m_clausesStaticBinary = 0;
+	m_clausesDynamicBinary = 0;
+	
+	// Clear watches.
+	for( unsigned int v = 1; v <= m_variables; ++v)
+	  {
+		std::vector< pointToClause* >().swap(m_watches[v << 1]); 
+		std::vector< pointToClause* >().swap(m_watches[(v << 1) ^ 1]); 
+		std::vector< pointToClause* >().swap(m_learnedWatches[v << 1]); 
+		std::vector< pointToClause* >().swap(m_learnedWatches[(v << 1) ^ 1]); 
+		std::vector< pointToClause* >().swap(q_cubeWatches[v << 1]); 
+		std::vector< pointToClause* >().swap(q_cubeWatches[(v << 1) ^ 1]); 
+		m_forcing[v] = NULL;
+		m_binForcing[v] = 0;
+
+		if( !q_deleted[v] && !m_assignment[v<<1] && !m_assignment[(v<<1)^1] && q_level[v] != 0 )
+		  { 
+			++m_literals; 
+
+			m_clausesStaticBinary += m_binWatchesLearnedIndex[v<<1] + m_binWatchesLearnedIndex[(v<<1)^1];
+			m_clausesDynamicBinary += (m_binWatches[v<<1].size()-m_binWatchesLearnedIndex[v<<1]) + (m_binWatches[(v<<1)^1].size()-m_binWatchesLearnedIndex[(v<<1)^1]);
+		  }
+	  }
+
+	m_clausesStaticBinary >>= 1;
+	m_clausesDynamicBinary >>= 1;
+	m_clausesBinary = m_clausesStaticBinary + m_clausesDynamicBinary;
+	m_clausesStatic = m_clausesStaticBinary;
+	m_clausesDynamic = m_clausesDynamicBinary;
+
+	// Now update watches for n-nary clauses	
+	unsigned int dsize = (unsigned int)m_clauseDatabase.size();
+       
+	for( unsigned int d = 0; d != dsize; ++d )
+	  {
+		assert( m_clauseDatabase[d] != NULL );
+		assert( m_clauseDatabase[d]->lbd() != 0 );
+		assert( m_clauseDatabase[d]->clause()[0] != 0 );
+
+		pointToClause* ptc = m_clauseDatabase[d];
+
+		ptc->setWatches();
+
+		if( ptc->lbd() == 1 )
+		  {
+			++m_clausesStatic;
+			assert( !m_assignment[ptc->clause()[0]] && !m_assignment[ptc->clause()[0]^1] );
+			// Update "m_watches".
+			m_watches[ ptc->clause()[0] ].push_back(ptc);
+			if( ptc->faq() != 1 )
+			  { 
+				assert( !isUniversal( ptc->clause()[1] ) );
+				assert( !m_assignment[ptc->clause()[1]] && !m_assignment[ptc->clause()[1]^1] );
+				m_watches[ptc->clause()[1]].push_back(ptc); 
+			  }
+				
+			// Update "m_watches" for universal variable
+			if( ptc->faq() < ptc->size() ) 
+			  { 
+				assert( isUniversal( ptc->clause()[ptc->faq()] ) );
+				assert( !m_assignment[Lit(ptc->clause()[ptc->faq()])] && !m_assignment[Lit(ptc->clause()[0])^1] );
+				m_watches[Lit(ptc->clause()[ptc->faq()])].push_back(ptc); 
+			  }
+		  }
+		else
+		  {
+			++m_clausesDynamic;
+			assert( ptc->lbd() > 1 );
+			// Update "m_learnedWatches".
+			m_learnedWatches[ ptc->clause()[0] ].push_back(ptc);
+			if( ptc->faq() != 1 )
+			  { 
+				assert( !isUniversal( ptc->clause()[1] ) );
+				m_learnedWatches[ptc->clause()[1]].push_back(ptc); 
+			  }
+	
+			// Update "m_watches" for universal variable
+			if( ptc->faq() < ptc->size() ) 
+			  { 
+				assert( isUniversal( ptc->clause()[ptc->faq()] ) );
+				m_learnedWatches[Lit(ptc->clause()[ptc->faq()])].push_back(ptc); 
+			  }
+
+		  }
+	  }
+
+	m_clauses = m_clausesStatic + m_clausesDynamic;
+
+	m_cubes = 0;
+
+	// Now update watches for solution cubes	
+	unsigned int csize = (unsigned int)q_solutionDatabase.size();
+       
+	for( unsigned int c = 0; c != csize; ++c )
+	  {
+		assert( q_solutionDatabase[c] != NULL );
+		assert( q_solutionDatabase[c]->lbd() != 0 );
+		assert( q_solutionDatabase[c]->clause()[0] != 0 );
+
+		++m_cubes;
+
+		pointToClause* ptc = q_solutionDatabase[c];
+
+		ptc->setWatches();
+
+		// Update "m_watches".
+		q_cubeWatches[ Lit(ptc->clause()[0]) ].push_back(ptc);
+		if( ptc->faq() != 1 )
+		  { q_cubeWatches[ Lit(ptc->clause()[1]) ].push_back(ptc); }
+	
+		// Update "m_watches" for universal variable
+		if( ptc->faq() < ptc->size() ) 
+		  { q_cubeWatches[ ptc->clause()[ptc->faq()] ].push_back(ptc); }
+	  }
+  }
+
+  void Core::updateVarorder( void )
+  {
+	if( !q_refreshVarorder )
+	  { return; }
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	q_refreshVarorder = false;
+
+	// clear var order lists
+	for(unsigned int i = q_decision; i != q_varOrder.size(); ++i )
+	  {
+#ifdef PREDEBUG
+		std::cout << "clear declevel " << i << std::endl;
+#endif
+		while( !q_varOrder[i]->empty() )
+		  { q_varOrder[i]->top(); }
+
+		q_litbylevel[i].clear();
+
+	  }
+
+	// Refill var order lists
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		unsigned int level = q_level[v];
+
+		if( q_deleted[v] || m_assignment[v<<1] || m_assignment[(v<<1)^1] || (level == 0 ) )
+		  { continue; }
+
+	#ifdef PREDEBUG
+		std::cout << v << " l: " << level << std::endl;
+#endif
+
+		q_litbylevel[level-1].push_back(getUniFlag(v<<1));
+		assert( !q_varOrder[level-1]->inHeap(v) );
+		q_varOrder[level-1]->insert(v); 
+		if( level <= q_decision )
+		  { q_decision = level-1; }
+	  }
+
+#ifdef PREDEBUG
+	std::cout << "lists: " << std::endl;
+	for(unsigned int i = q_decision; i != q_varOrder.size(); ++i )
+	  {
+		std::cout << (i+1) << (((i&1)==0)?"e: ":"a: ");
+		
+		for( std::vector< unsigned int >::iterator it = q_litbylevel[i].begin(); it != q_litbylevel[i].end(); ++it )
+		  {
+			std::cout << getLit(*it) << " (" << m_activity[Lit(*it)>>1] << ") ";
+		  }
+		std::cout << std::endl;
+	  }
+#endif
+  }
+
+  // Removes "clause" from occurence list of "lit"
+  void Core::removeFromOccurenceList( unsigned int lit, pointToClause* clause )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " " << getLit(lit) << std::endl;
+#endif
+	unsigned int osize( q_occur[ Lit(lit) ].size() );
+	unsigned int f( 0 );
+	for( ; f != osize; ++f )
+	  {
+		if( clause == q_occur[Lit(lit)][f] )
+		  {
+			q_occur[Lit(lit)][f--] = q_occur[Lit(lit)][--osize];
+			q_occur[Lit(lit)].pop_back();
+			break;
+		  }
+	  }
+
+	assert( f != osize );
+  }
+
+  // Removes every occurence of "clause"
+  // Mark "clause" as "to deleted"
+  void Core::clearAllOccurences( pointToClause* clause )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " ";
+	printClause(clause->clause());
+	std::cout << std::endl;
+#endif
+
+	unsigned int* lits( clause->clause() );
+	unsigned int pos( 0 );
+
+	assert(lits[pos] != 0 );
+	
+	while( lits[pos] != 0 )
+	  {
+		removeFromOccurenceList( lits[pos], clause );
+		++pos;
+	  }
+	
+	// Mark clause as to be deleted
+	clause->setLBD(0);
+  }
+
+  void Core::removeFromOccurenceList( unsigned int lit, pointToClause* clause, std::vector< std::vector< pointToClause* > >& occurlist )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " " << getLit(lit) << " from ";
+	printClause(clause->clause());
+#endif
+	unsigned int osize( occurlist[ Lit(lit) ].size() );
+	unsigned int f( 0 );
+	for( ; f != osize; ++f )
+	  {
+		if( clause == occurlist[Lit(lit)][f] )
+		  {
+			occurlist[Lit(lit)][f--] = occurlist[Lit(lit)][--osize];
+			occurlist[Lit(lit)].pop_back();
+			break;
+		  }
+	  }
+
+	assert( f != osize );
+  }
+
+  // Removes every occurence of "clause"
+  // Mark "clause" as "to deleted"
+  void Core::clearAllOccurences( pointToClause* clause, std::vector< std::vector< pointToClause* > >& occurlist )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int* lits( clause->clause() );
+	unsigned int pos( 0 );
+
+	assert(lits[pos] != 0 );
+	
+	while( lits[pos] != 0 )
+	  {
+		removeFromOccurenceList( lits[pos], clause, occurlist );
+		++pos;
+	  }
+	
+	// Mark clause as to be deleted
+	clause->setLBD(0);
+  }
+
+  void Core::deleteVariableFromDB( unsigned int var )
+  {
+	assert( !m_donttouch[var] );
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	std::cout << "del var : " << var << std::endl;
+#endif
+
+	unsigned int poslit = var<<1;
+	unsigned int neglit = (var<<1) + 1;
+
+#ifdef PREDEBUG
+	std::cout << "delete binaries" << std::endl;
+#endif
+	for( unsigned int i1 = 0; i1 != m_binWatches[poslit].size(); ++i1)
+	  {
+		unsigned int seclit = m_binWatches[poslit][i1];
+		removeBinary( seclit, poslit );
+	  }
+			
+	m_binWatches[poslit].clear();
+	m_binWatchesLearnedIndex[poslit] = 0;
+
+	for( unsigned int i1 = 0; i1 != m_binWatches[neglit].size(); ++i1)
+	  {
+		unsigned int seclit = m_binWatches[neglit][i1];
+		removeBinary( seclit, neglit );
+	  }
+	
+	m_binWatches[neglit].clear();
+	m_binWatchesLearnedIndex[neglit] = 0;
+
+	//delete naries
+	while( !q_occur[poslit].empty() )
+	  { clearAllOccurences( *q_occur[poslit].begin() ); }
+
+	while( !q_occur[neglit].empty() )
+	  { clearAllOccurences( *q_occur[neglit].begin() ); }
+
+	q_deleted[var] = true;
+  }
+
+  unsigned int Core::mergeClauses( pointToClause* ptc1, pointToClause* ptc2, unsigned int reslit, std::vector< unsigned int >& result ) const
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+	result.clear();
+	result.reserve( ptc1->size() + ptc2->size() - 2 );
+  
+	unsigned int negreslit = reslit^1;
+
+	unsigned int lbd = (unsigned int)( (ptc1->lbd() > 1) && (ptc2->lbd() > 1) ) + 1;
+
+	if( lbd > 1 )
+	  { lbd += (ptc1->lbd() + ptc2->lbd() - 1 ); }
+
+	unsigned int i = 0;
+	unsigned int j = 0;
+
+	while( ptc1->clause()[i] != 0 )
+	  {
+		assert( !m_assignment[Lit(ptc1->clause()[i])] && !m_assignment[Lit(ptc1->clause()[i])^1] );
+
+		if( ptc1->clause()[i] != reslit )
+		  { 
+			result.push_back(ptc1->clause()[i]); 
+		  }
+		++i;
+	  }
+
+	while( ptc2->clause()[j] != 0 )
+	  {
+		assert( !m_assignment[Lit(ptc2->clause()[j])] && !m_assignment[Lit(ptc2->clause()[j])^1] );
+
+		if( ptc2->clause()[j] != negreslit )
+		  {
+			result.push_back(ptc2->clause()[j]); 
+		  }
+		++j;
+	  }
+
+	std::sort( result.begin(), result.end() );
+
+	unsigned int target( 0 );
+
+	for( unsigned int i = 1; i != result.size(); ++i )
+	  {
+
+		if( result[i] == (result[target]^1) )
+		  {
+#ifdef PREDEBUG
+			std::cout << "tautologic clause" << std::endl;
+#endif
+			/* tautologic clause */
+			result.clear();
+			break;
+		  }
+		else if( result[i] != result[target] )
+		  {
+			/* skip duplicate literals */
+			++target;
+			if( target != i )
+			  { result[target] = result[i]; }
+		  }
+	  }
+    
+	// Cut off last literals
+	if( target + 1 < result.size() )
+	  {
+		result.resize( target + 1 );
+	  }    
+	return lbd;
+  }
+
+  unsigned int Core::mergeClauses( pointToClause* ptc, unsigned int reslit, unsigned int otherlitpos, std::vector< unsigned int >& result ) const
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+	result.clear();
+	result.reserve( ptc->size() );
+
+	unsigned int otherlit = m_binWatches[reslit][otherlitpos];
+
+	assert( !m_assignment[Lit(otherlit)] && !m_assignment[Lit(otherlit)^1] );
+
+	unsigned int* lits = ptc->clause();
+	unsigned int lbd = ptc->lbd();
+	if( otherlitpos < m_binWatchesLearnedIndex[reslit] )
+	  { lbd = 1; }
+
+	bool pushed( false );
+  
+	unsigned int i = 0;
+ 
+	while( lits[i] != 0 )
+	  {
+		assert( !m_assignment[Lit(lits[i])] && !m_assignment[Lit(lits[i])^1] );
+
+		// Tautological clause?
+		if( lits[i] == (otherlit^1) )
+		  { result.clear(); return lbd; }
+		// Put "otherlit" into new clause?
+		else if ( !pushed && ( lits[i] > otherlit ) )
+		  { 
+			result.push_back(otherlit); 
+			pushed = true;
+		  }
+
+		// Skip resolvent
+		if ( lits[i] != (reslit^1) ) 
+		  { 
+			result.push_back(lits[i]); 
+			if( lits[i] == otherlit )
+			  { pushed = true; }
+		  }
+		++i;
+	  }
+
+	std::sort(result.begin(), result.end());
+
+	// Reached last element without adding "otherlit"? 
+	// Then push "otherlit" add end of new clause
+	if( !pushed )
+	  {
+		result.push_back(otherlit); 
+	  }
+
+	return lbd;
+  }
+
+  // Counts the literals of merge of clause "c1" and "c2"
+  // Return 0, if result is a tautology
+  unsigned int Core::countMergeClauses( pointToClause* c1, pointToClause* c2, unsigned int reslit ) const
+  {
+	unsigned int negreslit( reslit^1 );
+
+	unsigned int i( 0 );
+	unsigned int j( 0 );
+	unsigned int resultsize( 0 );
+	  
+	unsigned int* c1lits = c1->clause();
+	unsigned int c1size = c1->size();
+	unsigned int* c2lits = c2->clause();
+	unsigned int c2size = c2->size();
+	unsigned int maxelevel( 0 );
+
+	while( i < c1size && j < c2size )
+	  {
+		// skip resolvent literals
+		if( (c1lits[i] == reslit) )
+		  { ++i; }
+		else if ( (c2lits[j] == negreslit) )
+		  { ++j; }
+		// tautological clause
+		else if( c1lits[i] == (c2lits[j]^1) )
+		  { return 0; } 
+		// proceed "c1"
+		else if( c1lits[i] < c2lits[j] )
+		  { 
+			if( !isUniversal(c1lits[i]) )
+			  {
+				if( q_level[c1lits[i]>>1] > maxelevel )
+				  { maxelevel = q_level[c1lits[i]>>1]; }
+			  }
+			// universal literal on deeper level than new deepest existential
+			else if( q_level[Lit(c1lits[i])>>1] > maxelevel )
+			  { ++i; continue; }
+
+			++i; ++resultsize; 
+		  }
+		// proceed "c2"
+		else if( c1lits[i] > c2lits[j] )
+		  { 
+			if( !isUniversal(c2lits[j]) )
+			  {
+				if( q_level[c2lits[j]>>1] > maxelevel )
+				  { maxelevel = q_level[c2lits[j]>>1]; }
+			  }
+			// universal literal on deeper level than new deepest existential
+			else if( q_level[Lit(c2lits[j])>>1] > maxelevel )
+			  { ++j; continue; }
+
+			++j; ++resultsize; 
+		  }
+		// skip duplicated literal
+		else
+		  { ++i; ++j; }
+	  }
+
+	// Proceed remaining "c1" - just check for forall reduction
+	while( c1lits[i] != 0 )
+	  {
+		if( !isUniversal(c1lits[i]) )
+		  {
+			if( q_level[c1lits[i]>>1] > maxelevel )
+			  { maxelevel = q_level[c1lits[i]>>1]; }
+		  }
+		// universal literal on deeper level than new deepest existential
+		else if( q_level[Lit(c1lits[i])>>1] > maxelevel )
+		  { ++i; continue; }
+		++i; ++resultsize;
+	  }
+
+	// Proceed remaining "c2" - just check for forall reduction	  
+	while( c2lits[j] != 0 )
+	  {
+		if( !isUniversal(c2lits[j]) )
+		  {
+			if( q_level[c2lits[j]>>1] > maxelevel )
+			  { maxelevel = q_level[c2lits[j]>>1]; }
+		  }
+		// universal literal on deeper level than new deepest existential
+		else if( q_level[Lit(c2lits[j])>>1] > maxelevel )
+		  { ++j; continue; }
+		++j; ++resultsize;
+	  }
+
+	return resultsize;
+  }
+
+  // Counts the literals of merge of clause "c" and "(reslit + otherlit)"
+  // Return 0, if result is a tautology
+  unsigned int Core::countMergeClauses( pointToClause* c, unsigned int reslit, unsigned int otherlit ) const
+  {
+	unsigned int i(0);
+	// Count from "1" for "otherlit"
+	int resultsize(1);
+
+	assert( c != NULL );
+	assert( c->lbd() != 0 );
+	assert( c->clause()[0] != 0 );
+
+	unsigned int* clits(c->clause());
+	unsigned int csize(c->size());
+	unsigned int maxelevel( 0 );
+
+	while( i < csize )
+	  {
+		// skip resolvent literal
+		if( (clits[i] == reslit) )
+		  { ++i; }
+		// tautological clause
+		else if( clits[i] == (otherlit^1) )
+		  { return 0; } 
+		// Skip duplicated literal
+		else if( clits[i] != otherlit )
+		  { 
+			if( !isUniversal(clits[i]) )
+			  {
+				if( q_level[clits[i]>>1] > maxelevel )
+				  { maxelevel = q_level[clits[i]>>1]; }
+			  }
+			// universal literal on deeper level than new deepest existential
+			else if( q_level[Lit(clits[i])>>1] > maxelevel )
+			  { ++i; continue; }
+			++i; ++resultsize; 
+		  }
+		// skip duplicated literal
+		else
+		  { ++i; }
+	  }
+
+	if( isUniversal(otherlit) && q_level[Lit(otherlit)>>1] > maxelevel )
+	  { --resultsize; }
+
+	return resultsize;
+  }
+
+  unsigned int Core::countMergeCubes( pointToClause* c1, pointToClause* c2, unsigned int reslit ) const
+  {
+	unsigned int negreslit( reslit^1 );
+
+	unsigned int i( 0 );
+	unsigned int j( 0 );
+	unsigned int resultsize( 0 );
+	  
+	unsigned int* c1lits = c1->clause();
+	unsigned int c1size = c1->size();
+	unsigned int* c2lits = c2->clause();
+	unsigned int c2size = c2->size();
+	unsigned int maxulevel( 0 );
+
+	while( i < c1size && j < c2size )
+	  {
+		// skip resolvent literals
+		if( (c1lits[i] == reslit) )
+		  { ++i; }
+		else if ( (c2lits[j] == negreslit) )
+		  { ++j; }
+		// tautological clause
+		else if( c1lits[i] == (c2lits[j]^1) )
+		  { return 0; } 
+		// proceed "c1"
+		else if( c1lits[i] < c2lits[j] )
+		  { 
+			if( isUniversal(c1lits[i]) )
+			  {
+				if( q_level[Lit(c1lits[i])>>1] > maxulevel )
+				  { maxulevel = q_level[Lit(c1lits[i])>>1]; }
+			  }
+			// existential literal on deeper level than new deepest existential
+			else if( q_level[c1lits[i]>>1] > maxulevel )
+			  { ++i; continue; }
+
+			++i; ++resultsize; 
+		  }
+		// proceed "c2"
+		else if( c1lits[i] > c2lits[j] )
+		  { 
+			if( isUniversal(c2lits[j]) )
+			  {
+				if( q_level[Lit(c2lits[j])>>1] > maxulevel )
+				  { maxulevel = q_level[Lit(c2lits[j])>>1]; }
+			  }
+			// universal literal on deeper level than new deepest existential
+			else if( q_level[c2lits[j]>>1] > maxulevel )
+			  { ++j; continue; }
+
+			++j; ++resultsize; 
+		  }
+		// skip duplicated literal
+		else
+		  { ++i; ++j; }
+	  }
+
+	// Proceed remaining "c1" - just check for forall reduction
+	while( c1lits[i] != 0 )
+	  {
+		if( isUniversal(c1lits[i]) )
+		  {
+			if( q_level[Lit(c1lits[i])>>1] > maxulevel )
+			  { maxulevel = q_level[Lit(c1lits[i])>>1]; }
+		  }
+		// universal literal on deeper level than new deepest existential
+		else if( q_level[c1lits[i]>>1] > maxulevel )
+		  { ++i; continue; }
+		++i; ++resultsize;
+	  }
+
+	// Proceed remaining "c2" - just check for forall reduction	  
+	while( c2lits[j] != 0 )
+	  {
+		if( isUniversal(c2lits[j]) )
+		  {
+			if( q_level[Lit(c2lits[j])>>1] > maxulevel )
+			  { maxulevel = q_level[Lit(c2lits[j])>>1]; }
+		  }
+		// universal literal on deeper level than new deepest existential
+		else if( q_level[c2lits[j]>>1] > maxulevel )
+		  { ++j; continue; }
+		++j; ++resultsize;
+	  }
+
+	return resultsize;
+  }
+
+  int Core::estimateCosts( unsigned int var ) const
+  {
+     
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	std::cout << "var: " << var << std::endl;
+#endif
+	int opv = (int)m_binWatches[Lit(var<<1)].size() + (int)q_occur[Lit(var<<1)].size();
+	int onv = (int)m_binWatches[Lit(var<<1)^1].size() + (int)q_occur[Lit(var<<1)^1].size();
+
+	
+#ifdef PREDEBUG
+	std::cout << "opv: " << opv << " onv: " << onv;
+#endif
+
+        
+	if( opv == 0 && onv == 0 ) 
+	  {
+		// return some incredibly high cost 
+		return 1000000000;
+	  }
+    
+    
+	int spv = 2 * (int)m_binWatches[Lit(var<<1)].size();
+	for( unsigned int i = 0; i != q_occur[Lit(var<<1)].size(); ++i )
+	  { spv += q_occur[Lit(var<<1)][i]->size(); }
+
+#ifdef PREDEBUG
+	std::cout << " spv: " << spv;
+#endif
+
+
+
+	int snv = 2 * (int)m_binWatches[Lit(var<<1)^1].size();
+	for( unsigned int i = 0; i != q_occur[Lit(var<<1)^1].size(); ++i )
+	  { snv += q_occur[Lit(var<<1)^1][i]->size(); }
+
+#ifdef PREDEBUG
+	std::cout << " snv: " << snv << std::endl;
+#endif
+    
+	assert( opv + onv > 0 );  
+	assert( spv >= 2 * opv );
+	assert( snv >= 2 * onv );
+      
+	int cost = onv * (spv - opv ) + opv * ( snv - onv ) - spv - snv;
+#ifdef PREDEBUG
+	std::cout << "cost: " << cost << std::endl;
+#endif
+    
+	return cost;
+  }
+
+  // Estimate costs for variable elimination of "var" with more accurate "countMergeClauses"
+  int Core::estimateCosts2 ( unsigned int var ) const 
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " ";
+#endif
+
+	assert( var <= m_variables );
+	unsigned int poslit = var<<1;
+	unsigned int neglit = (var<<1)^1;
+	unsigned int posbinsize = m_binWatches[poslit].size();
+	unsigned int negbinsize = m_binWatches[neglit].size();
+	//unsigned int posbinsize = m_binWatchesLearnedIndex[poslit];
+	//unsigned int negbinsize = m_binWatchesLearnedIndex[neglit];
+	unsigned int posoccursize = q_occur[poslit].size();
+	unsigned int negoccursize = q_occur[neglit].size();
+
+	// Return ridiculously high cost if variable occurs more than 20 times 
+	// I.e. do not take this variable into account
+	if ( (posbinsize + negbinsize + posoccursize + negoccursize) > 20 )
+	  { 
+#ifdef PREDEBUG
+		std::cout << "10000000" << std::endl;
+#endif
+		return 10000000; 
+	  }
+
+	// decrement binary lits 
+	int totalliterals = -(( posbinsize + negbinsize )<<1);
+	
+	for( unsigned int i = 0; i != posoccursize; ++i )
+	  { 
+		assert( q_occur[poslit][i] != NULL ); 
+		assert( q_occur[poslit][i]->clause() != NULL ); 
+		assert( q_occur[poslit][i]->clause()[0] != 0 ); 
+		assert( q_occur[poslit][i]->lbd() != 0 ); 
+
+		//if( q_occur[poslit][i]->lbd() > 1 )
+		// { continue; }
+
+		// decrement pos n-nary lits
+		totalliterals -= q_occur[poslit][i]->size(); 
+
+		// increment neg binary, pos n-nary lits
+		for( unsigned int j = 0; j != negbinsize; ++j )
+		  {
+			unsigned int tmpcount = countMergeClauses( q_occur[poslit][i], poslit, m_binWatches[neglit][j] );
+			totalliterals += (int)tmpcount;
+		  }
+		
+		// increment pos n-nary, neg n-nary lits
+		for( unsigned int k = 0; k != negoccursize; ++k )
+		  {
+			//if( q_occur[neglit][k]->lbd() == 1 )
+			  {
+				unsigned int tmpcount = countMergeClauses( q_occur[poslit][i], q_occur[neglit][k], poslit );
+				totalliterals += (int)tmpcount;
+			  }
+		  }
+	  }
+	for( unsigned int i = 0; i != negoccursize; ++i )
+	  { 
+		assert( q_occur[neglit][i] != NULL ); 
+		assert( q_occur[neglit][i]->clause() != NULL ); 
+		assert( q_occur[neglit][i]->clause()[0] != 0 ); 
+		assert( q_occur[neglit][i]->lbd() != 0 ); 
+
+		//if( q_occur[neglit][i]->lbd() > 1 )
+		//  { continue; }
+
+		// decrement neg n-nary lits
+		totalliterals -= q_occur[neglit][i]->size();
+
+		// increment pos binary, neg n-nary lits
+		for( unsigned int j = 0; j != posbinsize; ++j )
+		  {
+			unsigned int tmpcount = countMergeClauses( q_occur[neglit][i], neglit, m_binWatches[poslit][j] );
+			totalliterals += (int)tmpcount;
+		  }
+	  }
+
+	for( unsigned int i = 0; i != posbinsize; ++i )
+	  {
+		for( unsigned int j = 0; j != negbinsize; ++j )
+		  {
+			// increment pos+neg binary lits
+			if ( (Lit(m_binWatches[poslit][i])>>1) != (Lit(m_binWatches[neglit][j])>>1) )
+			  { totalliterals += 2;  } 
+		  }
+	  }
+
+#ifdef PREDEBUG
+	std::cout << totalliterals << std::endl;
+#endif
+	return totalliterals;
+  }
+
+  // Estimate costs for variable elimination of "var" with more accurate "countMergeClauses"
+  int Core::estimateCubeCosts ( unsigned int var, const std::vector< std::vector< pointToClause* > >& cubeoccur ) const 
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " ";
+#endif
+
+	assert( var <= m_variables );
+	unsigned int poslit = var<<1;
+	unsigned int neglit = (var<<1)^1;
+	unsigned int posoccursize = cubeoccur[poslit].size();
+	unsigned int negoccursize = cubeoccur[neglit].size();
+
+	int totalliterals(0);
+
+	for( unsigned int i = 0; i != posoccursize; ++i )
+	  { 
+		assert( q_occur[poslit][i] != NULL ); 
+		assert( q_occur[poslit][i]->lbd() != 0 ); 
+
+		// decrement pos n-nary lits
+		totalliterals -= cubeoccur[poslit][i]->size(); 
+
+		// increment pos n-nary, neg n-nary lits
+		for( unsigned int k = 0; k != negoccursize; ++k )
+		  {
+			if( cubeoccur[neglit][k]->lbd() == 1 )
+			  {
+				unsigned int tmpcount = countMergeClauses( cubeoccur[poslit][i], cubeoccur[neglit][k], poslit );
+					totalliterals += (int)tmpcount;
+			  }
+		  }
+	  }
+
+#ifdef PREDEBUG
+	std::cout << totalliterals << std::endl;
+#endif
+	return totalliterals;
+  }
+
+  // Removes "literal" from clause
+  // Eventually introduces new binary and mark old n-nary for deletion
+  // Returns "true" if n-nary clause is deleted, "false" otherwise
+  bool Core::strengthenClause( pointToClause* clause, unsigned int literal, bool keepoccurence )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	printClause(clause);
+	std::cout << "lit: " << getLit(literal) << std::endl;
+#endif
+	bool result(false);
+	unsigned int pos( 0 );
+	unsigned int qos( 0 );
+	unsigned long long sign( 0 );
+	unsigned int* lits( clause->clause() );
+	assert( lits[clause->size()] == 0 );
+
+	unsigned int maxelevel(0);
+
+	// Remove "literal" from clause
+	while( lits[pos] != 0 )
+	  {
+		if( lits[ pos ] != literal )
+		  {
+			// perform forall reduction
+			if( !isUniversal(lits[pos]) )
+			  { 
+				if( maxelevel < q_level[lits[pos]>>1] )
+				  { maxelevel = q_level[lits[pos]>>1]; }
+			  }
+			else
+			  {
+				// skip universal literal an deeper levels
+				if( maxelevel < q_level[Lit(lits[pos])>>1] )
+				  { 
+					removeFromOccurenceList(lits[pos], clause );
+					++pos; 
+					continue; 
+				  }
+			  }
+
+			lits[ qos ] = lits[ pos ];
+			sign |= 1ULL << ( (lits[qos]>>1) % 64);
+
+			++qos;
+		  }
+		++pos;
+	  }
+
+	assert( pos != qos );
+	lits[qos] = 0;
+
+	clause->setSize(qos);
+
+	// We got a new implication
+	if( qos == 1 )
+	  {
+		assert( !isUniversal(lits[0]) );
+
+		// Variable already assigned in opposite polarity? Set clause as "empty clause"
+		if( m_assignment[lits[0]^1] )
+		  { clause->setSize(0); return true; }
+
+		if( !m_assignment[ lits[0] ] )
+		  {	addImplication( lits[0], NULL ); }
+
+		clearAllOccurences(clause);
+		result = true;
+	  }
+	// We got a new binary
+	else if( qos == 2 )
+	  {
+		// Add the new binary
+		bool learned = (clause->lbd() > 1);
+		if ( !addBinary(lits[0], lits[1], learned ) &&
+			 ( learned ) && (clause->lbd() == 1 ) )
+		  {
+			// replace a dynamic binary through a former static n-nary?
+			swapBinary( lits[0], lits[1] ); 
+			swapBinary( lits[1], lits[0] ); 
+		  }
+
+		clearAllOccurences(clause);
+		result = true;
+	  }
+	else
+	  {
+		assert( lits[2] != 0 );
+		clause->setSign(sign);
+
+		if( !isUniversal(literal ) )
+		  { clause->setFAQ( clause->faq()-1 ); }
+	  }
+
+	if( !keepoccurence )
+	  { removeFromOccurenceList( literal, clause ); }
+
+#ifdef PREDEBUG
+	std::cout << "clause after strengthen: ";
+	printClause(clause);
+#endif
+
+	return result;
+  }
+
+  // Removes "literal" from cube
+  // returns "true" if new units are generated
+  bool Core::strengthenCube( pointToClause* cube, unsigned int literal )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	printClause(cube);
+	std::cout << "lit: " << getLit(literal) << std::endl;
+#endif
+
+	unsigned int pos( 0 );
+	unsigned int qos( 0 );
+	unsigned long long sign( 0 );
+	unsigned int* lits( cube->clause() );
+	assert( lits[cube->size()] == 0 );
+
+	unsigned int maxelevel(0);
+
+	// Remove "literal" from clause
+	while( lits[pos] != 0 )
+	  {
+		if( lits[ pos ] != literal )
+		  {
+			// perform forall reduction
+			if( isUniversal(lits[pos]) )
+			  { 
+				if( maxelevel < q_level[Lit(lits[pos])>>1] )
+				  { maxelevel = q_level[Lit(lits[pos])>>1]; }
+			  }
+			else
+			  {
+				// skip existential literal an deeper levels
+				if( maxelevel < q_level[lits[pos]>>1] )
+				  { 
+					++pos; 
+					continue; 
+				  }
+			  }
+
+			lits[ qos ] = lits[ pos ];
+			sign |= 1ULL << ( (lits[qos]>>1) % 64);
+
+			++qos;
+		  }
+		++pos;
+	  }
+
+	assert( pos != qos );
+	lits[qos] = 0;
+
+	cube->setSize(qos);
+
+	// We got a new implication
+	if( qos == 1 )
+	  {
+		assert( isUniversal(lits[0]) );
+
+		// Variable already assigned in opposite polarity? Set clause as "empty clause"
+		if( m_assignment[lits[0]^1] )
+		  { cube->setSize(0); return true; }
+
+		if( !m_assignment[ lits[0] ] )
+		  {	addImplication( lits[0], NULL ); }
+
+		return true;
+	  }
+	else
+	  {
+		cube->setSign(sign);
+
+		if( isUniversal(literal ) )
+		  { cube->setFAQ( cube->faq()-1 ); }
+	  }
+
+#ifdef PREDEBUG
+	std::cout << "cube after strengthen: ";
+	printClause(cube);
+#endif
+
+	return false;
+  }
+
+
+  bool Core::forallReduction( bool& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int maxlevel(0);
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		if( q_deleted[v] )
+		  { continue; }
+		
+		if( q_level[v] > maxlevel && ((q_level[v]&1)!=0) )
+		  { maxlevel = q_level[v]; }
+	  }	
+
+	if( maxlevel < q_maxqlevel )
+	  {
+		q_deletedLevels += (q_maxqlevel-maxlevel);
+		q_maxqlevel = maxlevel;
+		if( ( (q_maxqlevel & 1) == 0 ) && ( q_maxqlevel != 0 ) )
+		  { --q_maxqlevel; ++q_deletedLevels; }
+#ifdef PREDEBUG
+		std::cout << "new qmaxlevel!! " << q_maxqlevel << std::endl;
+#endif
+	  }
+	else 
+	  { return true; }
+
+	// Add this point we have a new maximum quantifier level => forall reduction
+	didsomething = true;
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		// Just proceed universal variables an larger level than the new "q_maxqlevel"
+		if( q_deleted[v] || ((q_level[v]&1) != 0 ) || q_level[v] < q_maxqlevel )
+		  { continue; }
+
+#ifdef PREDEBUG
+		std::cout << "delete: " << v << " qlevel: " << q_level[v] << " maxlevel: " << q_maxqlevel << std::endl;
+#endif
+		
+		assert( (q_level[v]&1) == 0 );
+
+		unsigned int poslit( v<<1 );
+		unsigned int neglit( (v<<1)^1);
+
+		// Proceed binaries
+		for( unsigned int i = 0; i != m_binWatches[poslit].size(); ++i )
+		  {
+			unsigned int seclit( m_binWatches[poslit][i] );
+			assert( !isUniversal(seclit) );
+
+			// Remove second binary
+			removeBinary( seclit, getUniFlag(poslit) );
+
+			// "seclit" already assigned in opposite polarity?
+			if( m_assignment[seclit^1] )
+			  { return false; }
+			// not assigned so far?
+			else if ( !m_assignment[seclit] )
+			  { addImplication(seclit, NULL ); }
+		  }
+
+		for( unsigned int i = 0; i != m_binWatches[neglit].size(); ++i )
+		  {
+			unsigned int seclit( m_binWatches[neglit][i] );
+			assert( !isUniversal(m_binWatches[neglit][i]) );
+
+			// Remove second binary
+			removeBinary( seclit, getUniFlag(neglit) );
+
+			// already assigned in opposite polarity?
+			if( m_assignment[seclit^1] )
+			  { return false; }
+			// not assigned so far?
+			else if( !m_assignment[seclit] )
+			  { addImplication(seclit, NULL ); }
+		  }
+
+		m_binWatches[poslit].clear();
+		m_binWatches[neglit].clear();
+		m_binWatchesLearnedIndex[poslit] = 0;
+		m_binWatchesLearnedIndex[neglit] = 0;
+
+		// proceed n-naries
+		for( unsigned int i = 0; i != q_occur[poslit].size(); ++i )
+		  {
+			strengthenClause( q_occur[poslit][i], getUniFlag(poslit), true );
+			if( q_occur[poslit][i]->size() == 0 )
+			  { return false; }
+		  }
+		for( unsigned int i = 0; i != q_occur[neglit].size(); ++i )
+		  {
+			strengthenClause( q_occur[neglit][i], getUniFlag(neglit), true );
+			if( q_occur[neglit][i]->size() == 0 )
+			  { return false; }
+		  }
+
+		q_occur[poslit].clear();
+		q_occur[neglit].clear();
+	  }
+
+	return true;
+  }
+
+  bool Core::forallReduction( pointToClause* ptc, unsigned int maxelevel, bool& isremoved )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int* clause( ptc->clause() );
+
+	unsigned int pos(ptc->faq());
+	unsigned int qos = pos;
+	
+	while( clause[pos] != 0 )
+	  {
+		if( maxelevel > q_level[Lit(clause[pos])>>1] )
+		  {
+			clause[qos] = clause[pos];
+			++qos;
+		  }
+		else
+		  { 
+			removeFromOccurenceList( clause[pos], ptc );
+		  }
+		++pos;
+	  }
+	
+	clause[qos] = 0;
+
+	ptc->setSize(qos);
+
+	if( qos == 0)
+	  {
+#ifdef PREDEBUG
+		std::cout << "receive empty clause" << std::endl;               
+#endif
+		return false; 
+	  }
+	else if( qos == 1 )
+	  {
+#ifdef PREDEBUG
+		std::cout << "receive unit" << std::endl;               
+#endif
+		if( isUniversal(clause[0]) || m_assignment[clause[0]^1] )
+		  { return false; }
+					
+		if( !m_assignment[clause[0]] )
+		  { addImplication( clause[0], NULL ); }
+
+		ptc->setLBD(0);
+	  }
+	else if( qos == 2 )
+	  { 
+		bool learned( ptc->lbd() > 1 );
+		addBinary( ptc->clause()[0], ptc->clause()[1], learned );
+		isremoved = true;
+		clearAllOccurences( ptc );
+	  }
+
+	ptc->calcSign();
+
+#ifdef PREDEBUG
+	std::cout << "new clause: " << std::endl;
+	printClause(ptc);
+#endif
+	return true;
+  }
+
+  bool Core::existReduction( pointToClause* ptc, unsigned int maxulevel )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int* cube( ptc->clause() );
+
+	unsigned int pos(ptc->faq());
+	unsigned int qos = pos;
+	
+	while( cube[pos] != 0 )
+	  {
+		if( maxulevel < q_level[Lit(cube[pos])] )
+		  {
+			cube[qos] = cube[pos];
+			++qos;
+		  }
+		++pos;
+	  }
+	
+	cube[qos] = 0;
+
+	ptc->setSize(qos);
+
+	if( qos == 0)
+	  {
+#ifdef PREDEBUG
+		std::cout << "receive empty clause" << std::endl;               
+#endif
+		return false; 
+	  }
+	else if( qos == 1 )
+	  {
+#ifdef PREDEBUG
+		std::cout << "receive unit" << std::endl;               
+#endif
+
+		if( !isUniversal(cube[0]) || m_assignment[Lit(cube[0])^1] )
+		  { return false; }
+					
+		if( !m_assignment[cube[0]] )
+		  { addImplication( cube[0], NULL ); }
+		ptc->setLBD(0);
+	  }
+
+#ifdef PREDEBUG
+	std::cout << "new cube: " << std::endl;
+	printClause(ptc);
+#endif
+	return true;
+  }
+
+  bool Core::mergeQuantLevel( unsigned int& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	//printdatabase();
+#endif
+
+	std::vector<bool> isReduced( q_maxqlevel+1, true);
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  { 
+#ifdef PREDEBUG
+		std::cout << "v: " << v << " d: " << q_deleted[v] << " l: " << q_level[v] << " [" << assignedTo(v<<1) << "]" << std::endl;
+#endif
+		if( q_deleted[v] || m_assignment[v<<1] || m_assignment[(v<<1)^1] )
+		  { continue; }
+		isReduced[ q_level[v] ] = false; 
+	  }
+
+	// We do not shift variables to the first quant level to ensure the correctness of the model
+	for( unsigned int r = (isReduced.size()-1); r > 2; --r )
+	  {
+#ifdef PREDEBUG
+		std::cout << "r: " << r << " " << isReduced[r] << std::endl;
+#endif
+		if( isReduced[r] )
+		  {
+			didsomething |= 0x10;
+			q_refreshVarorder = true;
+			++q_mergedLevels;
+#ifdef PREDEBUG
+			std::cout << "quant level " << r << " can be removed " << std::endl;
+#endif
+			// Last existlevel can be removed? Perform forall reduction
+			if( r == q_maxqlevel )
+			  { 
+				bool something( false );
+				if( !forallReduction( something ) )
+				  { return false; }
+			  }
+			else
+			  {
+				// Update max quant level if we delete the last universal level
+				if( r == (q_maxqlevel-1) )
+				  { q_maxqlevel = q_maxqlevel - 2; }
+
+				// Shift all quantifer levels of variables on deeper level than "r"
+				for( unsigned int v = 1; v <= m_variables; ++v )
+				  { 
+					if( q_level[v] > r )
+					  { 
+						assert( q_level[v] > 2 );
+						q_level[v] = q_level[v]-2; 
+						assert( q_level[v] != 1 );
+						isReduced[q_level[v]] = false; 
+					  }
+				  }
+#ifdef PREDEBUG
+				//printdatabase();
+#endif
+			  }
+		  }
+	  }
+	return true;
+  }
+
+  bool Core::propagateUnits( bool delall )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	assert( m_decisionLevel == 0 );
+
+	bool didsomething = false;
+
+	m_dsImplIndex = q_dsPropIndex;
+
+	if( delall )
+      { m_dsImplIndex = 1; }
+	
+	do {
+	  // first deduce all collected implications
+	  while( m_dsImplIndex != m_dsEndIndex )
+		{
+		  // Remove every clause with "poslit" and strengthen every clause with "neglit"
+		  unsigned int poslit( m_decisionStack[m_dsImplIndex] );
+		  unsigned int neglit( m_decisionStack[m_dsImplIndex]^1 );
+
+		  ++m_dsImplIndex;
+		  ++q_unitprop;
+
+#ifdef PREDEBUG
+		  std::cout << "propagate: " << getLit(poslit) << std::endl;
+#endif
+
+		  // Has to be assigned, since it's part of the decision stack.
+		  assert( m_assignment[Lit(poslit)] || m_assignment[Lit(neglit)] ); 
+
+		  //assert( !q_keeplit[Lit(poslit)>>1] );
+
+		  // Proceed positive binary occurences
+		  for( unsigned int i = 0; i != m_binWatches[Lit(poslit)].size(); ++i)
+			{
+			  unsigned int seclit( m_binWatches[Lit(poslit)][i] );
+			  removeBinary( seclit, poslit );
+			}
+
+		  // Clear binary list
+		  m_binWatches[Lit(poslit)].clear();
+
+		  // Proceed positive n-nary clauses
+		  while( !q_occur[Lit(poslit)].empty() ) 
+			{
+			  assert( *q_occur[Lit(poslit)].rbegin() != NULL );
+
+			  pointToClause* clause( *q_occur[Lit(poslit)].rbegin() );
+			  unsigned int* lits( clause->clause() );
+
+			  q_occur[Lit(poslit)].pop_back();
+				
+			  unsigned int pos( 0 );
+
+			  // Update all other occurence lists
+			  while( lits[pos] != 0 )
+				{
+				  if( lits[pos] != poslit )
+					{ removeFromOccurenceList( lits[pos], clause ); }
+				  ++pos;
+				}
+			  // Mark clause as to deleted
+			  clause->setLBD(0);
+			}		
+		
+		  // Now strengthen the clauses with negative occurences
+
+		  // First consider binary clauses
+		  for( unsigned int i = 0; i != m_binWatches[Lit(neglit)].size(); ++i)
+			{
+			  unsigned int seclit( m_binWatches[Lit(neglit)][i] );
+
+			  if( m_assignment[Lit(seclit)^1] || isUniversal(seclit) )
+				{ 
+				  if( m_control->getVerbosity() > 0 )
+					{
+					  std::cout << "c contradiction in unit propagation with " << getLit(seclit) << " -> UNSAT" << std::endl;
+					}
+				  return false; 
+				}
+		
+			  if( !m_assignment[Lit(seclit)] )
+				{ 
+				  addBinImplication(seclit, neglit); 
+				}
+
+			  removeBinary( seclit, neglit );
+			}
+		
+		  // Clear binary list
+		  m_binWatches[Lit(neglit)].clear();
+
+		  // Now consider n-nary clauses with negative occurences
+		  while( !q_occur[Lit(neglit)].empty() ) 
+			{
+			  assert( *q_occur[Lit(neglit)].rbegin() != NULL );
+
+			  pointToClause* clause( *q_occur[Lit(neglit)].rbegin() );
+			  q_occur[Lit(neglit)].pop_back();
+
+			  // Clause already deleted
+			  if( clause->lbd() == 0 )
+				{ continue; }
+
+			  strengthenClause( clause, neglit, true );
+			  if( clause->size() == 0 )
+				{ return false; }
+			}
+
+		  // Mark variable as deleted
+		  q_deleted[Lit(poslit)>>1] = true;
+		}
+
+	  didsomething = false;
+	  // Did we deleted a complete quantifier level? Then perform forall reduction
+	  if ( !forallReduction( didsomething ) )
+		{ return false; }
+	} while ( didsomething );
+
+	q_dsPropIndex = m_dsEndIndex;
+   
+	// At this point all implications are performed 
+	// And all occurence lists are up to date
+	// Now, delete marked clauses from clausedatabase
+
+	unsigned int csize = (unsigned int)m_clauseDatabase.size();
+	for( unsigned int c = 0; c != csize; ++c )
+	  {
+		assert( m_clauseDatabase[c] != NULL );
+		assert( m_clauseDatabase[c]->clause() != NULL );
+		assert( m_clauseDatabase[c]->clause()[0] != 0 );
+
+		// delete marked clauses permanatly
+		if( m_clauseDatabase[c]->lbd() == 0 )
+		  {
+			m_openIDs.push_back(m_clauseDatabase[c]->id());
+			delete m_clauseDatabase[c];
+			m_clauseDatabase[c--] = m_clauseDatabase[--csize];
+			m_clauseDatabase.pop_back();
+		  }
+	  }
+  
+	return true;
+  }
+
+
+  bool Core::variableElimination ( unsigned int& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	if( q_maxqlevel <= 1 )
+	  { return true; }
+
+	unsigned int reslits(q_reslits);
+	unsigned int nxtRecalc(q_reslits);
+	bool recalc( false );
+
+	//std::vector< unsigned int > candidates;
+	std::list< std::pair<unsigned int, int> > varcost;
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+#ifdef PREDEBUG
+		std::cout << "v: " << v << " qlevel: " << q_level[v] << " maxlevel: " << q_maxqlevel << " donttouch: " << m_donttouch[v] << std::endl;
+#endif
+		if( !q_deleted[v] && (q_level[v] == q_maxqlevel) && !m_donttouch[v])
+		  { 
+			int cost = estimateCosts2( v );
+			
+			varcost.push_back( std::pair< unsigned int, int >(v,cost));
+		  }
+	  }
+
+	varcost.sort(sortPairBySecond<unsigned int,int>);
+
+#ifdef PREDEBUG
+	std::cout << "candidates: " << varcost.size() << std::endl;
+#endif
+
+	bool restart(false);
+
+	while( true )
+	  {
+		unsigned int resvar(0);
+		int cost(0);
+	
+		if( varcost.empty() )
+		  { break; }
+
+		// Recalculate costs:
+		// - Every 512 variable eliminations or
+		// - If new unit was created or
+		// - If the actual costs are higher than the estimiated
+		if( recalc || ( (nxtRecalc + 511) < q_reslits ) )
+		  {
+			recalc = false;
+			nxtRecalc = q_reslits;
+			for( std::list<std::pair< unsigned int, int> >::iterator s = varcost.begin(); s != varcost.end(); )
+			  {
+				unsigned int var = s->first;
+				if( q_deleted[var] )
+				  { 
+					s = varcost.erase(s);
+					continue; 
+				  }
+
+				cost = estimateCosts2(var);
+				s->second = cost;
+
+				++s;
+			  }
+			varcost.sort(sortPairBySecond<unsigned int,int>);
+
+			// reached timeout?
+			double timeC(0.0);
+			struct rusage resources;
+			getrusage(RUSAGE_SELF, &resources);
+			timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;	
+			if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+			  { 
+				return true;
+			  }			
+			
+		  }
+
+		for( std::list<std::pair< unsigned int, int> >::iterator s = varcost.begin(); s != varcost.end(); ++s )
+		  {
+			// found a candidate for var Elimination!
+			unsigned int var = s->first;
+			//unsigned int costs = ( m_binWatches[var<<1].size() + m_binWatches[(var<<1)^1].size() + q_occur[var<<1].size() + q_occur[(var<<1)^1].size());
+
+#ifdef PREDEBUG
+			std::cout << "var: " << var << " estcost: " << s->second << /*" costs: "  << costs <<*/ std::endl;
+#endif
+			
+			if( !q_deleted[var] && ( s->second <= 0 ) /*&& costs <= 10*/ )
+			  { 
+				int realcost = estimateCosts2(var);
+				if( realcost > s->second )
+				  { 
+					recalc = true; 
+					// skip if costs are to high
+					if( realcost > 0 )
+					  { continue; }
+				  }
+
+				resvar = var; 
+				varcost.erase(s);
+				break;
+			  }
+		  }
+		
+		if (resvar == 0 ) 
+		  { 
+			if( restart )
+			  { restart = false; recalc = true; continue; }
+			break; 
+		  }
+
+		didsomething |= 0x8;
+		restart = true;
+
+		++q_reslits;
+		
+		//std::cout << "proceed var " << resvar << " cost: " << estimateCosts2(resvar) << " candidates: " << varcost.size() << std::endl;
+
+#ifdef PREDEBUG
+		std::cout << "next candidate: " << resvar << " " << cost << " " << estimateCosts2(resvar) << std::endl;
+#endif
+
+		std::vector< std::pair< std::vector< unsigned int >, unsigned int > > resolvents;
+		unsigned int poslit = resvar<<1;
+		unsigned int neglit = (resvar<<1)^1;
+
+		assert( !m_assignment[poslit] && !m_assignment[neglit] );
+
+		std::vector<unsigned int> newClause( 2 );
+		
+		for( unsigned int i1 = 0; i1 != m_binWatches[poslit].size(); ++i1 )
+		  //for( unsigned int i1 = 0; i1 != m_binWatchesLearnedIndex[poslit]; ++i1 )
+		  {
+			unsigned int posseclit =  m_binWatches[poslit][i1];
+
+			assert( !m_assignment[Lit(posseclit)] && !m_assignment[Lit(posseclit)^1] );
+
+			/* resolve pos binary and neg binary */			
+			for( unsigned int i2 = 0; i2 != m_binWatches[neglit].size(); ++i2 )
+			  //for( unsigned int i2 = 0; i2 != m_binWatchesLearnedIndex[neglit]; ++i2 )
+			  {
+				unsigned int negseclit =  m_binWatches[neglit][i2];
+
+#ifdef PREDEBUG
+				std::cout << "resolve bins: " << (poslit>>1) << " " << getLit(posseclit) << " & " 
+						  << "-" << (neglit>>1) << " " << getLit(negseclit) << std::endl;
+#endif
+
+				assert( !m_assignment[Lit(negseclit)] && !m_assignment[Lit(negseclit)^1] );
+
+					// Resolved tautology? => Skip!
+				if( posseclit == (negseclit^1) )
+				  { continue; }
+				// Resolved (a+b) and (~a+b)? => b is constant
+				else if( posseclit == negseclit )
+				  {
+					if( isUniversal(posseclit) )
+					  { return false; }
+
+					newClause.resize(1);
+					newClause[0] = posseclit;
+
+#ifdef PREDEBUG
+					std::cout << "resolvent: ";
+					for( unsigned int f = 0 ; f != newClause.size(); ++f )
+					  { std::cout << getLit(newClause[f]) << " "; }
+					std::cout << " lbd: 0" << std::endl;
+#endif
+
+					resolvents.push_back(std::make_pair(newClause, 0) );
+					newClause.resize( 2 );
+				  }
+				// Ordinary resolution step
+				else
+				  {
+					assert( newClause.size() == 2 );
+					newClause[0] = posseclit;
+					newClause[1] = negseclit;
+
+					if( newClause[0] > newClause[1] ) 
+					  { std::swap( newClause[0], newClause[1] ); }
+
+#ifdef PREDEBUG
+					std::cout << "resolvent: ";
+					for( unsigned int f = 0 ; f != newClause.size(); ++f )
+					  { std::cout << getLit(newClause[f]) << " "; }
+					std::cout << std::endl;
+#endif
+
+					unsigned int lbd = (unsigned int)( i1 > m_binWatchesLearnedIndex[poslit] && i2 > m_binWatchesLearnedIndex[neglit] ) + 1;
+					resolvents.push_back( std::make_pair(newClause, lbd) );
+					newClause.resize( 2 );
+				  }
+			  }
+			
+			/* resolve pos binary and neg nary clauses */
+			for( unsigned int i2 = 0; i2 != q_occur[neglit].size(); ++i2 )
+			  {
+				assert( q_occur[neglit][i2] != NULL );
+				assert( q_occur[neglit][i2]->clause() != NULL );
+				assert( q_occur[neglit][i2]->clause()[0] != 0);
+				assert( q_occur[neglit][i2]->lbd() != 0 );
+
+				newClause.clear();
+
+				//if( q_occur[neglit][i2]->lbd() > 1 )
+				// { continue; }
+#ifdef PREDEBUG
+				std::cout << "resolve: " << (poslit>>1) << " " << getLit(posseclit) << " & ";
+				printClause(q_occur[neglit][i2]);
+				std::cout << std::endl;
+#endif
+				
+				unsigned int lbd = mergeClauses( q_occur[neglit][i2], poslit, i1, newClause );
+
+#ifdef PREDEBUG
+				std::cout << "resolvent: ";
+				for( unsigned int f = 0 ; f != newClause.size(); ++f )
+				  { std::cout << getLit(newClause[f]) << " "; }
+				std::cout << " lbd: " << lbd << std::endl;
+#endif
+				
+				if( !newClause.empty() )
+				  { resolvents.push_back( std::make_pair(newClause, lbd) ); }
+			  }
+			newClause.resize(2);
+		  }
+
+		for( unsigned int i1 = 0; i1 != q_occur[poslit].size(); ++i1 )
+		  {
+			pointToClause* c1 = q_occur[poslit][i1];
+			assert( c1 != NULL );
+			assert( c1->clause() != NULL );
+			assert( c1->clause()[0] != 0);
+			assert( c1->lbd() != 0 );
+
+			//if( c1->lbd() > 1 )
+			// { continue; }
+
+			/* resolve pos nary and neg binary clauses */
+			for( unsigned int i2 = 0; i2 != m_binWatches[neglit].size(); ++i2 )
+			  //for( unsigned int i2 = 0; i2 != m_binWatchesLearnedIndex[neglit]; ++i2 )
+			  {
+				newClause.clear();
+
+#ifndef NDEBUG
+				unsigned int negseclit( m_binWatches[Lit(neglit)][i2] );
+#endif
+
+#ifdef PREDEBUG
+				std::cout << "resolve: -" << (neglit>>1) << " " << getLit(negseclit) << " & ";
+				printClause(q_occur[poslit][i1]);
+#endif
+
+				assert( !m_assignment[Lit(negseclit)] && !m_assignment[Lit(negseclit)^1] );
+
+				unsigned int lbd = mergeClauses( q_occur[poslit][i1], neglit, i2, newClause );
+
+#ifdef PREDEBUG
+				std::cout << "resolvent: ";
+				for( unsigned int f = 0 ; f != newClause.size(); ++f )
+				  { std::cout << getLit(newClause[f]) << " "; }
+				std::cout << " lbd: " << lbd << std::endl;
+#endif
+
+				if( !newClause.empty() )
+				  { resolvents.push_back( std::make_pair(newClause, lbd) ); }
+			  }
+
+			/* resolve pos nary and neg nary clauses */
+			for( unsigned int i2 = 0; i2 != q_occur[neglit].size(); ++i2 )
+			  {
+				pointToClause* c2 = q_occur[neglit][i2];
+				assert( c2 != NULL );
+				assert( c2->clause() != NULL );
+				assert( c2->clause()[0] != 0);
+				assert( c2->lbd() != 0 );
+
+				//if( c2->lbd() > 1 )
+				//  { continue; }
+
+#ifdef PREDEBUG
+				std::cout << "resolve: ";
+				printClause(q_occur[poslit][i1]);
+				std::cout << " & ";
+				printClause(q_occur[neglit][i2]);
+#endif
+
+				newClause.clear();
+                
+				unsigned int lbd = mergeClauses( c1, c2, poslit, newClause );
+
+#ifdef PREDEBUG
+				std::cout << "resolvent: ";
+				for( unsigned int f = 0 ; f != newClause.size(); ++f )
+				  { std::cout << getLit(newClause[f]) << " "; }
+				std::cout << " lbd: " << lbd << std::endl;
+#endif
+
+				if( !newClause.empty() )
+				  { resolvents.push_back( std::make_pair(newClause, lbd) ); }
+			  }
+		  }
+
+		// delete all clauses containing resvar
+		deleteVariableFromDB( resvar );
+
+#ifdef PREDEBUG
+		std::cout << "resolvents: (" << resolvents.size() << ")" << std::endl;
+#endif
+		
+		for( unsigned int c = 0; c != resolvents.size(); ++c )
+		  { 
+
+			unsigned long long sign( 0 );
+			for( unsigned int s = 0; s != resolvents[c].first.size(); ++s )
+			  { 
+				sign |= 1ULL << ((resolvents[c].first[s]>>1) % 64); 
+#ifdef PREDEBUG
+				std::cout << getLit(resolvents[c].first[s]) << " ";
+#endif
+			  }			
+#ifdef PREDEBUG
+			std::cout << " lbd: " << resolvents[c].second << std::endl;
+#endif
+
+			std::sort(resolvents[c].first.begin(), resolvents[c].first.end());
+
+			// If we got a binary or unit, do not check forward subsumption
+			if( resolvents[c].first.size() < 3 )
+			  { 
+				if ( !addClause(resolvents[c].first, true, resolvents[c].second ) )
+				  { return false; }
+			  }
+			// Clause is subsumed by existing clause?
+			else if( !isForwardSubsumed( resolvents[c].first, sign ) )
+			  {
+				if ( !addClause(resolvents[c].first, true, resolvents[c].second ) )
+				  { return false; }
+
+				assert( resolvents[c].second != 0 );
+			  }
+		  }
+
+		// Did we add new unit(s)?
+		// First propagate these units before next resolution step
+		if( m_dsImplIndex != m_dsEndIndex )
+		  { 
+			recalc = true;
+			if( !propagateUnits() )
+			  { return false; }
+		  }
+
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "c variable elimination, eliminated vars: " << (q_reslits - reslits) << std::endl;
+	  }
+
+	return propagateUnits();
+  }
+
+  // TODO
+  bool Core::cubeResolution ( std::vector< std::vector< pointToClause* > >& cubeoccur )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	assert( false );
+
+	if( q_maxqlevel <= 1 )
+	  { return true; }
+
+	unsigned int reslits(q_reslits);
+	unsigned int nxtRecalc(q_reslits);
+	bool recalc( false );
+
+	//std::vector< unsigned int > candidates;
+	std::list< std::pair<unsigned int, int> > varcost;
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+#ifdef PREDEBUG
+		std::cout << "v: " << v << " qlevel: " << q_level[v] << " maxlevel: " << q_maxqlevel << " donttouch: " << m_donttouch[v] << std::endl;
+#endif
+		if( !q_deleted[v] && (q_level[v] == (q_maxqlevel-1) ) && !m_donttouch[v])
+		  { 
+			int cost = estimateCubeCosts( v, cubeoccur );
+			
+			varcost.push_back( std::pair< unsigned int, int >(v,cost));
+		  }
+	  }
+
+	varcost.sort(sortPairBySecond<unsigned int,int>);
+
+#ifdef PREDEBUG
+	std::cout << "candidates: " << varcost.size() << std::endl;
+#endif
+
+	bool restart(false);
+
+	while( true )
+	  {
+		unsigned int resvar(0);
+		int cost(0);
+	
+		if( varcost.empty() )
+		  { break; }
+
+		// Recalculate costs:
+		// - Every 256 variable eliminations or
+		// - If new unit was created or
+		// - If the actual costs are higher than the estimiated
+		if( recalc || ( (nxtRecalc + 255) < q_reslits ) )
+		  {
+			recalc = false;
+			nxtRecalc = q_reslits;
+			for( std::list<std::pair< unsigned int, int> >::iterator s = varcost.begin(); s != varcost.end(); )
+			  {
+				unsigned int var = s->first;
+				if( q_deleted[var] )
+				  { 
+					s = varcost.erase(s);
+					continue; 
+				  }
+
+				cost = estimateCubeCosts(var, cubeoccur);
+				s->second = cost;
+
+				++s;
+			  }
+			varcost.sort(sortPairBySecond<unsigned int,int>);
+		  }
+
+		for( std::list<std::pair< unsigned int, int> >::iterator s = varcost.begin(); s != varcost.end(); ++s )
+		  {
+			// found a candidate for var Elimination!
+			unsigned int var = s->first;
+
+#ifdef PREDEBUG
+			std::cout << "var: " << var << " estcost: " << s->second << std::endl;
+#endif
+			
+			if( !q_deleted[var] && ( s->second <= 0 ) )
+			  { 
+				if( estimateCubeCosts(var, cubeoccur) > s->second )
+				  { recalc = true; }
+
+				resvar = var; 
+				varcost.erase(s);
+				break;
+			  }
+		  }
+		
+		if (resvar == 0 ) 
+		  { 
+			if( restart )
+			  { restart = false; recalc = true; continue; }
+			break; 
+		  }
+
+		restart = true;
+
+#ifdef PREDEBUG
+		std::cout << "next candidate: " << resvar << " " << cost << std::endl;
+#endif
+
+		std::vector< std::vector< unsigned int > > resolvents;
+		unsigned int poslit = resvar<<1;
+		unsigned int neglit = (resvar<<1)^1;
+
+		assert( !m_assignment[poslit] && !m_assignment[neglit] );
+
+		std::vector<unsigned int> newClause(2);
+		
+#ifdef PREDEBUG
+		std::cout << "resolve" << std::endl;
+#endif
+		
+		for( unsigned int i1 = 0; i1 != cubeoccur[poslit].size(); ++i1 )
+		  {
+			pointToClause* c1 = cubeoccur[poslit][i1];
+			assert( c1 != NULL );
+			assert( c1->clause() != NULL );
+			assert( c1->clause()[0] != 0 );
+			assert( c1->lbd() != 0 );
+
+			/* resolve pos nary and neg cube */
+			for( unsigned int i2 = 0; i2 != cubeoccur[neglit].size(); ++i2 )
+			  {
+				pointToClause* c2 = cubeoccur[neglit][i2];
+				assert( c2 != NULL );
+				assert( c2->clause() != NULL );
+				assert( c2->clause()[0] != 0);
+				assert( c2->lbd() != 0 );
+#ifdef PREDEBUG
+				std::cout << "resolve: ";
+				printClause(cubeoccur[poslit][i1]->clause());
+				std::cout << " & ";
+				printClause(cubeoccur[neglit][i2]->clause());
+				std::cout << std::endl;
+#endif
+
+				newClause.clear();
+                
+				mergeClauses( c1, c2, poslit, newClause );
+
+#ifdef PREDEBUG
+				std::cout << "resolvent: ";
+				for( unsigned int f = 0 ; f != newClause.size(); ++f )
+				  { std::cout << getLit(newClause[f]) << " "; }
+				std::cout << std::endl;
+#endif
+
+				if( !newClause.empty() )
+				  { resolvents.push_back(newClause); }
+			  }
+		  }
+
+#ifdef PREDEBUG
+		std::cout << "resolvents: (" << resolvents.size() << ")" << std::endl;
+#endif
+
+		for( unsigned int c = 0; c != resolvents.size(); ++c )
+		  { 
+			
+			unsigned long long sign( 0 );
+			for( unsigned int s = 0; s != resolvents[c].size(); ++s )
+			  { 
+				sign |= 1ULL << ((resolvents[c][s]>>1) % 64); 
+#ifdef PREDEBUG
+				std::cout << getLit(resolvents[c][s]) << " ";
+#endif
+			  }			
+#ifdef PREDEBUG
+			std::cout << std::endl;
+#endif
+
+			std::sort(resolvents[c].begin(), resolvents[c].end());
+
+			// Cube is subsumed by existing cube?
+			if( !cubeIsForwardSubsumed( resolvents[c], sign, cubeoccur ) )
+			  {
+				// Add new cube
+				// TODO
+			  }
+		  }
+
+		// Did we add new unit(s)?
+		// First propagate these units before next resolution step
+		if( m_dsImplIndex != m_dsEndIndex )
+		  { 
+			recalc = true;
+			if( !propagateUnits() )
+			  { return false; }
+		  }
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "c variable elimination, eliminated vars: " << (q_reslits - reslits) << std::endl;
+	  }
+	return propagateUnits();
+  }
+
+
+  // dedect trivial pure
+  bool Core::detectMonotone( bool& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int monolits(q_monolits);
+	unsigned int dclits(q_dclits);
+	
+	for(unsigned int v = 0; v <= m_variables; ++v )
+	  {
+		if( q_level[v] == 0 || q_deleted[v] || m_donttouch[v] || m_assignment[v<<1] || m_assignment[(v<<1)^1] )
+		  { continue; }
+
+		bool dc = false;
+		unsigned int lit(0);
+
+#ifdef PREDEBUG
+		std::cout << v << " pos occur: " << (m_binWatches[v<<1].size() + q_occur[v<<1].size()) << " neg occur: " << (m_binWatches[(v<<1)^1].size() + q_occur[(v<<1)^1].size()) << std::endl;
+		std::cout << "is empty?" <<  m_binWatches[v<<1].empty() << " " << q_occur[v<<1].empty() << " " << m_binWatches[(v<<1)^1].empty() << " " << q_occur[(v<<1)^1].empty() << std::endl;
+#endif
+		if( m_binWatches[v<<1].empty() && q_occur[v<<1].empty() )
+		  {
+			lit = v<<1;
+#ifdef PREDEBUG
+			std::cout << getLit(lit) << " is trivially pure" << std::endl;
+#endif
+			if( (q_level[v]&1 ) != 0 )
+			  { lit ^= 1; }
+
+			didsomething = true;
+			dc = true;
+		  } 
+
+		if( m_binWatches[(v<<1)^1].empty() && q_occur[(v<<1)^1].empty() )
+		  {
+			lit = (v<<1)+1;
+#ifdef PREDEBUG
+			std::cout << getLit(lit) << " is trivially pure" << std::endl;
+#endif
+			if( (q_level[v]&1 ) != 0 )
+			  { lit ^= 1; }
+
+			if( dc && !m_donttouch[v] )
+			  { 
+#ifdef PREDEBUG
+				std::cout << " is don't care" << std::endl;
+#endif
+				deleteVariableFromDB(v);
+				lit = 0;
+				++q_dclits;
+			  }
+			didsomething = true;
+		  }
+ 
+		if( lit != 0 )
+		  { 
+			addImplication( getUniFlag(lit), NULL ); 
+			++q_monolits;
+		  }
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "c monotone lits: " << (q_monolits - monolits ) << std::endl
+				  << "c dc lits: " << (q_dclits - dclits ) << std::endl;
+	  }
+	return propagateUnits();
+  }
+
+  bool Core::findBinaryConsAndEquiv( bool& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	//printdatabase();
+#endif
+
+	unsigned int cons(q_cons);
+	unsigned int equiv(q_equiv);
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		if( q_level[v] == 0 || q_deleted[v] ) 
+		  { continue; }
+
+#ifdef PREDEBUG
+		std::cout << "check var: " << v << std::endl;
+#endif
+		unsigned int poslit = v<<1;
+		unsigned int neglit = poslit^1;
+
+#ifdef PREDEBUG
+		std::cout << "pos binwatches of " << getLit(poslit) << std::endl;
+		for( unsigned int t = 0; t != m_binWatches[poslit].size(); ++t )
+		  {
+			std::cout << getLit(poslit) << " " << getLit(m_binWatches[poslit][t]) << std::endl;
+		  }
+		std::cout << "learnedindex: " <<  m_binWatchesLearnedIndex[poslit] << std::endl;
+		std::cout << "neg binwatches of " << getLit(neglit) << std::endl;
+		for( unsigned int t = 0; t != m_binWatches[neglit].size(); ++t )
+		  {
+			std::cout << getLit(neglit) << " " << getLit(m_binWatches[neglit][t]) << std::endl;
+		  }
+		std::cout << "learnedindex: " << m_binWatchesLearnedIndex[neglit] << std::endl;
+#endif
+
+	  STARTOVER_VAR:
+
+		unsigned int psize = (unsigned int)m_binWatches[poslit].size();
+		unsigned int nsize = (unsigned int)m_binWatches[neglit].size();
+
+		for( unsigned int p = 0; p < psize; ++p )
+		  {
+			unsigned int seclit = m_binWatches[poslit][p];
+			
+			for( unsigned int n = 0; n < nsize; ++n)
+			  {
+				// Constant?
+				if( m_binWatches[neglit][n] == seclit )
+				  {
+					didsomething = true;
+					++q_cons;
+
+					if( isUniversal( seclit ) )
+					  { return false; }
+
+#ifdef PREDEBUG
+					std::cout << "find constant: " << getLit(seclit) << std::endl;
+#endif 
+					assert( !m_assignment[Lit(seclit)] && !m_assignment[Lit(seclit)^1] );
+						
+					addImplication(seclit, NULL );
+
+					if (!propagateUnits() )
+					  { return false; }
+
+					// Start over with this variable
+					goto STARTOVER_VAR;
+				  }
+				// Equivalence?
+				else if ( m_binWatches[neglit][n] == (seclit^1) )
+				  {
+
+					unsigned int replacelit( getUniFlag(neglit) );
+
+					// If "seclit" is don't touch, or on a higher quantification level
+					// swap with "replacelit" so that the don't touch variable will not be removed
+					
+					// Both variables don't touch? Do nothing...
+					if (m_donttouch[Lit(seclit)>>1] && m_donttouch[Lit(replacelit)>>1] )
+					  { continue; }
+
+					// replacelit on larger level than toreplacelit? -> switch them
+					if( q_level[Lit(seclit)>>1] < q_level[Lit(replacelit)>>1] )
+					  { 
+						replacelit = seclit;
+						seclit = getUniFlag(neglit);
+					  }
+
+					assert( q_level[Lit(seclit)>>1] >= q_level[Lit(replacelit)>>1] );
+					// if variable on deeper level is universal -> UNSAT
+					if( isUniversal(seclit) )
+					  { return false; }
+
+					// toreplacelit is don't touch? Do nothing...
+					if (m_donttouch[Lit(seclit)>>1])
+					  { continue; }
+
+					didsomething = true;
+					++q_equiv;
+
+#ifdef PREDEBUG
+					std::cout << "find equivalence: " << getLit(seclit) << " " << getLit(replacelit) << std::endl;
+#endif 
+
+					// Remove binary clauses defining the equivalence
+					removeBinary(replacelit, seclit^1);
+					removeBinary(replacelit^1, seclit );
+
+					// Replace the occurence of "seclit" with "replacelit"
+					if ( !replaceVariable(seclit, replacelit ) )
+					  { return false; }
+
+					psize = (unsigned int)m_binWatches[poslit].size();
+					nsize = (unsigned int)m_binWatches[neglit].size();
+
+#ifdef PREDEBUG
+					std::cout << "pos binwatches of " << getLit(poslit) << std::endl;
+					for( unsigned int t = 0; t != m_binWatches[poslit].size(); ++t )
+					  {
+						std::cout << getLit(poslit) << " " << getLit(m_binWatches[poslit][t]) << std::endl;
+					  }
+					std::cout << "neg binwatches of " << getLit(neglit) << std::endl;
+					for( unsigned int t = 0; t != m_binWatches[neglit].size(); ++t )
+					  {
+						std::cout << getLit(neglit) << " " << getLit(m_binWatches[neglit][t]) << std::endl;
+					  }
+#endif
+
+					goto STARTOVER_VAR;
+				  }
+			  }
+		  }
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "c binary cons: " << ( q_cons - cons ) << std::endl
+				  << "c binary equiv: " << ( q_equiv - equiv ) << std::endl;
+	  }
+
+	return propagateUnits();
+  }
+
+  // Replace every occurence of "toReplace" with "replace"
+  // Refresh occurence lists
+  // Preserves model for replaced variable
+  bool Core::replaceVariable(unsigned int toReplace, unsigned replace )
+  {
+	assert( !m_donttouch[Lit(toReplace)>>1] );
+
+	assert( isUniversal(replace) == ( (q_level[Lit(replace)>>1]&1) == 0 ) );
+
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	std::cout << "replace " << getLit(toReplace) << " l: " << q_level[Lit(toReplace)>>1] << " with " << getLit(replace) << " l: " << q_level[Lit(replace)>>1] << std::endl;
+#endif
+
+	if( isUniversal(getUniFlag(toReplace)) )
+	  { return false; }
+
+	if( isUniversal(getUniFlag(replace)) && (m_assignment[toReplace] || m_assignment[toReplace^1] ) )
+	  { 
+#ifdef PREDEBUG
+		std::cout << "try to replace universal literal with unit " << std::endl;
+#endif
+		return false; 
+	  }
+	//replace binaries first
+	unsigned int bsize = (unsigned int)m_binWatches[toReplace].size();
+#ifdef PREDEBUG
+	std::cout << "qlevel: " << q_level[Lit(replace)>>1] << " uni: " << isUniversal(replace) << std::endl;
+	std::cout << getLit(toReplace) << " binsize: " << bsize << std::endl;
+#endif
+
+	for( unsigned int i = 0; i != bsize; ++i )
+	  {
+		unsigned int seclit = m_binWatches[toReplace][i];
+		
+#ifdef PREDEBUG
+		std::cout << "replace bin " << getLit(toReplace) << " " << getLit(seclit) << std::endl;
+#endif
+		// Obtain a new binary with two universal literals?
+		if( isUniversal(replace) && isUniversal(seclit) && ( (replace^1) != seclit ) )
+		  { return false; }
+#ifdef PREDEBUG
+		std::cout << "with: " << getLit(replace) << " " << getLit(seclit) << std::endl;
+#endif
+
+		// Find constant...
+		if( ( replace == seclit ) || 
+			( isUniversal(replace) && ( q_level[Lit(seclit)>>1] < q_level[Lit(replace)>>1]  ) ) )
+		  {
+			++q_cons;
+
+			if( m_assignment[seclit^1] )
+			  { return false; }
+
+			if( !m_assignment[seclit] )
+			  { addImplication( seclit, NULL ); }
+
+			removeBinary( seclit, toReplace );
+		  }
+		// Skip the responsible clause for the equivalence
+		else if ( (replace^1) != seclit )
+		  { 
+			// "replace" is constanst due to forall reduction?
+			// add additional binary indicating this constant
+			if( isUniversal(seclit) && ( q_level[replace>>1] < q_level[Lit(seclit)>>1] ) )
+			  {
+				bool flearn(false);
+				addBinary( replace, (seclit^1), flearn );
+			  }
+
+			// Add new binary
+			bool learned( i >= m_binWatchesLearnedIndex[toReplace] );
+			addBinary( replace, seclit, learned );
+
+			// Remove the dual binary clause of seclit
+			removeBinary( seclit, toReplace );
+		  }
+	  }
+
+	m_binWatches[toReplace].clear();
+	m_binWatchesLearnedIndex[toReplace] = 0;
+
+	// Now proceed the negatative occurences of "toReplace"
+	bsize = (unsigned int)m_binWatches[toReplace^1].size();
+	for( unsigned int i = 0; i != bsize; ++i )
+	  {
+
+		unsigned int seclit = m_binWatches[toReplace^1][i];
+#ifdef PREDEBUG
+		std::cout << "replace bin " << getLit(toReplace^1) << " " << getLit(seclit) << std::endl;
+#endif
+		// Obtain a new binary with two universal literals?
+		if( isUniversal(replace) && isUniversal(seclit) && ( replace != seclit ) )
+		  { return false; }
+
+#ifdef PREDEBUG
+		std::cout << "with: " << getLit(replace^1) << " " << getLit(seclit) << std::endl;
+#endif
+
+		// Find constant...
+		if( ( (replace^1) == seclit ) ||
+			( isUniversal(replace) && ( q_level[Lit(seclit)>>1] < q_level[Lit(replace)>>1 ]  ) ) )
+		  {
+			++q_cons;
+
+			if( m_assignment[seclit^1] )
+			  { return false; }
+			
+			if( !m_assignment[seclit] )
+			  { addImplication( seclit, NULL ); }
+
+			// Remove the dual binary clause of seclit
+			removeBinary( seclit, (toReplace^1) );
+		  }
+		// Skip the responsible clause for the equivalence
+		else if ( replace != seclit )
+		  {
+			// "replace" is constanst due to forall reduction?
+			// add additional binary indicating this constant
+			if( isUniversal(seclit) && ( q_level[replace>>1] < q_level[Lit(seclit)>>1] ) )
+			  {
+				bool flearn(false);
+				addBinary( (replace^1), (seclit^1), flearn );
+			  }
+
+			bool learned( i >= m_binWatchesLearnedIndex[toReplace^1] );
+			// Add new binary
+			addBinary( (replace^1), seclit, learned );
+
+			// Remove the dual binary clause of seclit
+			removeBinary( seclit, (toReplace^1) );
+		  }
+	  }
+
+	m_binWatches[toReplace^1].clear();
+	m_binWatchesLearnedIndex[toReplace^1] = 0;
+
+#ifdef PREDEBUG
+	std::cout << "new bin watches of " << (Lit(replace)>>1) << std::endl;
+	for( unsigned int i = 0; i != m_binWatches[Lit(replace)].size(); ++i )
+	  {
+		std::cout << getLit(replace) << " " << getLit(m_binWatches[Lit(replace)][i]) << std::endl;
+	  }
+	std::cout << "index: " << m_binWatchesLearnedIndex[Lit(replace)] << std::endl;
+	for( unsigned int i = 0; i != m_binWatches[Lit(replace)^1].size(); ++i )
+	  {
+		std::cout << getLit(replace^1) << " " << getLit(m_binWatches[Lit(replace)^1][i]) << std::endl;
+	  }
+	std::cout << "index: " << m_binWatchesLearnedIndex[Lit(replace)^1] << std::endl;
+#endif
+
+	// Now replace in nary clauses
+
+#ifdef PREDEBUG
+	std::cout << "occur list of " << getLit(toReplace) << std::endl;
+	printOccur(toReplace);
+	std::cout << "old occur list of " << getLit(replace) << std::endl;
+	printOccur(replace);
+#endif
+
+	unsigned int osize = (unsigned int)q_occur[toReplace].size();
+
+	for( unsigned int i = 0; i != osize; ++i )
+	  {
+		pointToClause* ptc = q_occur[toReplace][i];
+
+#ifdef PREDEBUG
+		std::cout << "replace " << getLit(toReplace) << " with " << getLit(replace) << " in" << std::endl;
+		printClause(ptc);
+#endif
+
+		// clause already marked as deleted?
+		if( ptc->lbd() == 0 )
+		  { continue; }
+
+		int occ = ptc->hasLitPolarity( replace );
+
+		// After replacement clause would consists of ( l1 + ... + replace + ~replace ) 
+		// Clause is satisfied after replacement -> delete occurences of clause and mark for deletion
+		if( occ == -1 )
+		  {
+#ifdef PREDEBUG
+			std::cout << "new clause is tautology" << std::endl;
+#endif
+			clearAllOccurences(ptc);
+			// Clause is also deleted in current vector -> update values
+			--i; --osize;
+		  }
+		// Replaced literal is already in clause -> remove "toReplace" from clause
+		else if( occ == +1 )
+		  {
+#ifdef PREDEBUG
+			std::cout << getLit(replace) << " already exists" << std::endl;
+#endif
+			// Keep occurence of clause, since it will be deleted anyway afterwards
+			strengthenClause( ptc, toReplace, true );
+			if( ptc->size() == 0 )
+			  { return false; }
+		  }
+		// just replace
+		else
+		  {
+			unsigned int pos(0);
+			unsigned int* lits( ptc->clause() );
+			unsigned int maxelevel(0);
+
+			while( lits[pos] != 0 )
+			  {
+				if( lits[ pos ] == toReplace )
+				  {
+					lits[pos] = replace;
+				  }
+				if( !isUniversal(lits[pos]) && q_level[Lit(lits[pos])>>1] > maxelevel )
+				  { maxelevel = q_level[Lit(lits[pos])>>1] ; }
+				++pos;
+			  }
+
+			ptc->sort();
+
+			pos = ptc->faq();
+			if( !isUniversal(getUniFlag(toReplace)) && isUniversal(replace) )
+			  { ptc->setFAQ(--pos); }
+
+			// Update occurence list of "replace"
+			q_occur[Lit(replace)].push_back(ptc);
+
+			// Did we delete the variable with largest existential level in clause?
+			if( ( ptc->faq() < ptc->size() ) && ( q_level[toReplace>>1] > maxelevel ) )
+			  {
+#ifdef PREDEBUG
+				std::cout << "can perform forall reduction" << std::endl;
+#endif
+				bool isremoved( false );
+				// Perform forall reduction with clause
+				if( !forallReduction( ptc, maxelevel, isremoved ) )
+				  { return false; }
+			  }
+
+#ifdef PREDEBUG
+			std::cout << "standard replace, new clause:" << std::endl;
+			printClause(ptc);
+#endif
+		  }
+	  }
+
+	// Delete the old occurence list
+	q_occur[toReplace].clear();
+
+#ifdef PREDEBUG
+	std::cout << "new occur list of " << getLit(replace) << std::endl;
+	printOccur(replace);
+	std::cout << "occur list of " << getLit(toReplace^1) << std::endl;
+	printOccur(toReplace^1);
+	std::cout << "old occur list of " << getLit(replace^1) << std::endl;
+	printOccur(replace^1);
+#endif
+
+	// Now consider the negative occurences of "toReplace"
+	osize = (unsigned int)q_occur[toReplace^1].size();
+	for( unsigned int i = 0; i != osize; ++i )
+	  {
+		pointToClause* ptc = q_occur[toReplace^1][i];
+
+#ifdef PREDEBUG
+		std::cout << "replace " << getLit(toReplace^1) << " with " << getLit(replace^1) << " in" << std::endl;
+		printClause(ptc);
+#endif
+
+		// clause already marked as deleted?
+		if( ptc->lbd() == 0 )
+		  { continue; }
+
+		int occ = ptc->hasLitPolarity( replace^1 );
+
+		// After replacement clause would consists of ( l1 + ... + replace + ~replace ) 
+		// Clause is satisfied after replacement -> delete occurences of clause and mark for deletion
+		if( occ == -1 )
+		  {
+#ifdef PREDEBUG
+			std::cout << "new clause is tautology" << std::endl;
+#endif
+			clearAllOccurences(ptc);
+			// Clause is also deleted in current vector -> update values
+			--i; --osize;
+		  }
+		// Replaced literal is already in clause -> remove "toReplace" from clause
+		else if( occ == +1 )
+		  {
+#ifdef PREDEBUG
+			std::cout << getLit(replace^1) << " already exists" << std::endl;
+#endif
+			// Keep occurence of clause, since it will be deleted anyway afterwards
+			strengthenClause( ptc, toReplace^1, true );
+			if( ptc->size() == 0 )
+			  { return false; }
+		  }
+		// just replace
+		else
+		  {
+			unsigned int pos(0);
+			unsigned int* lits( ptc->clause() );
+			unsigned int maxelevel(0);
+
+			while( lits[pos] != 0 )
+			  {
+				if( lits[ pos ] == (toReplace^1) )
+				  {
+					lits[pos] = replace^1;
+				  }
+
+				if( !isUniversal(lits[pos]) && q_level[Lit(lits[pos])>>1] > maxelevel )
+				  { maxelevel = q_level[Lit(lits[pos])>>1] ; }
+				++pos;
+			  }
+
+			ptc->sort();
+
+			pos = ptc->faq();
+			if( !isUniversal(getUniFlag(toReplace)) && isUniversal(replace) )
+			  { ptc->setFAQ(--pos); }
+
+			// Update occurence list of "replace"
+			q_occur[Lit(replace^1)].push_back(ptc);
+
+			// Did we delete the variable with largest existential level in clause?
+			if( q_level[toReplace>>1] > maxelevel )
+			  {
+#ifdef PREDEBUG
+				std::cout << "can perform forall reduction" << std::endl;
+#endif
+				bool isremoved( false );
+				// Perform forall reduction with clause
+				if( !forallReduction( ptc, maxelevel, isremoved ) )
+				  { return false; }
+			  }
+
+#ifdef PREDEBUG
+			std::cout << "standard replace, new clause:" << std::endl;
+			printClause(ptc);
+#endif
+		  }
+	  }
+
+	// Delete the old occurence list
+	q_occur[toReplace^1].clear();
+
+#ifdef PREDEBUG
+	std::cout << "new occur list of " << getLit(replace^1) << std::endl;
+	printOccur(toReplace^1);
+#endif
+
+	// Preserve model for replaced variable
+	bool pol = !( (replace^toReplace) & 1);
+	q_replaces[Lit(replace)>>1].push_back((toReplace|1)^pol);
+
+	while( !q_replaces[toReplace>>1].empty() )
+	  {
+		// Change replaced variables of currently replaces variable
+		unsigned int furtherlit = q_replaces[toReplace>>1].back();
+		q_replaces[toReplace>>1].pop_back();
+
+		assert( q_replaces[Lit(furtherlit)>>1].empty() );
+
+		pol = !( (toReplace^furtherlit^replace) & 1);
+		q_replaces[Lit(replace)>>1].push_back((furtherlit|1)^pol);
+
+	  }
+
+	q_deleted[toReplace>>1] = true;
+
+	return propagateUnits();
+  }
+
+  void Core::extendModel( void )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	std::cout << "q_elimclauses: " << std::endl;
+	for( unsigned int e = 0; e != q_elimclauses.size() ; ++e )
+	  {
+		std::cout << q_elimclauses[e] << " ";
+	  }
+	std::cout << std::endl << "interpreation of q_elimclauses" << std::endl;
+	for( int e = q_elimclauses.size()-1; e >= 0 ; --e )
+	  {
+		int csize = q_elimclauses[e];
+		for( int c = 0; c != csize; ++c )
+		  {
+			std::cout << getLit(q_elimclauses[e-c-1]) << " [" << assignedTo(q_elimclauses[e-c-1]) << "] ";
+		  }
+		std::cout << std::endl;
+		e -= csize;
+	  }
+#endif
+
+	int i, j;
+	unsigned int x;
+	
+	for ( i = q_elimclauses.size()-1; i > 0; i -= j)
+	  {
+		for (j = q_elimclauses[i--]; j > 1; j--, i--)
+		  {
+			std::cout << getLit(q_elimclauses[i]) << " " << m_model[Lit(q_elimclauses[i])>>1] << std::endl;
+			if ( (m_model[Lit(q_elimclauses[i])>>1]&1) == Lit(q_elimclauses[i]) )
+			  { goto next; }
+
+			if( !isUniversal(q_elimclauses[i]) )
+			  //if( q_level[ Lit(q_elimclauses[i])>>1] == 1 )
+			  {
+				x = q_elimclauses[i];
+				m_model[x>>1] = x;
+#ifdef PREDEBUG
+				std::cout << "in extend model: set modelvalue of " << (x>>1) << " to " << getLit(m_model[x>>1]) << std::endl;
+#endif
+			  }
+		  }
+	  next:;
+	  }
+  }
+}

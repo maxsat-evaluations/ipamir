@@ -1,0 +1,1326 @@
+#include "core.hpp"
+
+/* TODO: - deletetion of pure- and dc-literals
+		 - split conflict- and solution-analyze
+		 - delete conflictingClause after conflict analysis of a solution
+*/
+
+namespace quantom {
+
+  // Performs conflict analysis according to the 1UIP scheme and backtracks.
+  // Returns FALSE if we observe a clause and the QBF is unsatisfiable OR if we observe a cube and the QBF is satisfiable,
+  // otherwise TRUE will be returned
+#ifdef COMBSOLVER
+  bool Core::analyze (unsigned int* conflictingClause, unsigned int curlevel, Implications impl)
+#else
+  bool Core::analyze (unsigned int* conflictingClause, unsigned int curlevel )
+#endif
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// Update "m_incVarActivity".
+	m_incVarActivity *= m_varActMultiplier;
+
+	bool cube = false;
+	
+	if( isUniversal(conflictingClause[0]) )
+	  {
+		cube = true;
+		// Increment the number of solutions encountered so far.
+		++q_solutions;
+#ifdef OUTPUT
+		if( curlevel == 0 )
+		  { std::cout << ":"; }
+#endif
+	  }
+	else
+	  {
+		// Increment the number of conflicts encountered so far.
+		++m_conflicts;
+#ifdef OUTPUT
+		std::cout << "!";
+#endif
+	  }
+
+	// Everything OK wrt. "conflictingClause"?
+	assert(conflictingClause != NULL);
+
+	// Initialization.
+	unsigned int uip(0);
+	unsigned int pos(m_dsEndIndex - 1); 
+	unsigned int resolvelevel(q_maxqlevel+1);
+	unsigned int curDLevel(m_decisionLevel);
+	unsigned int finalmlevel(m_decisionLevel);
+	unsigned int elements( 0 );
+	unsigned int length( 0 );
+	unsigned int lit( 0 ); 
+	unsigned int size( 0 );
+	unsigned int resolutions( 0 );
+
+	bool toresolve( false );
+	bool resolvemode( false );
+	bool resolveonlyuip( false );
+
+	if( m_binConflict[0] == 0 && ( isUniversal( conflictingClause[1] ) != cube ) )
+	  {
+#ifdef ANADEBUG
+		std::cout << "set resolveonlyuip" << std::endl;
+#endif
+		assert( isUniversal( conflictingClause[0] ) == cube );
+		resolveonlyuip = true; 
+	  }
+
+	unsigned int maxmlevel(0);
+	unsigned int maxemlevelat(0);
+	unsigned int maxmat(0);
+	unsigned int maxeqlevel(0);
+	unsigned int maxuqlevel(0);
+	unsigned int uipat(0);
+	bool uipinclause( false );
+	bool checkclause( false );
+
+	std::vector<bool> pushed;
+	std::vector<bool> checked;
+	checked.resize( ((m_variables+1) << 1) , false); 
+	pushed.resize( ( m_variables+1 ) , false); 
+
+#ifdef ANADEBUG
+	std::cout << "conflicting clause: " << std::endl;
+	printClause(conflictingClause, true);
+	std::cout << std::endl;
+#endif
+
+	if( curlevel != 0 )
+	  { 
+		curDLevel = curlevel; 
+		finalmlevel = curlevel;
+		while( m_level[Lit(m_decisionStack[pos])>>1] > curDLevel )
+		  { --pos;}
+	  }
+
+	// Do we have a binary conflicting clause?
+	if (m_binConflict[0] != 0 && m_binConflict[1] != 0 && !cube )
+	  {
+
+		++resolutions;
+
+		// Get both literals of the binary conflicting clause.
+		unsigned int lit0(m_binConflict[0]);
+		unsigned int lit1(m_binConflict[1]);
+
+		// Both "lit0" and "lit1" have to be assigned on the current decision level or we implied an universal lit.
+		assert( ( m_level[Lit(lit0) >> 1] == curDLevel && m_level[Lit(lit1) >> 1] == curDLevel ) || ( isUniversal(m_binConflict[1]) != cube ) ); 
+
+		// Reset "m_binConflict".
+		m_binConflict[0] = 0;
+		m_binConflict[1] = 0;
+
+		// Update "checked".
+		checked[Lit(lit0)] = true;
+		checked[Lit(lit1)] = true;
+			
+		// Increase the activity of both "lit0" and "lit1".
+		increaseActivityVSIDS(Lit(lit0) >> 1);
+		increaseActivityVSIDS(Lit(lit1) >> 1);
+		  
+		// Update "elements".
+		elements += 2;
+
+		if( isPureOrDC(lit1) || isUniversal(lit1) != cube ) 
+		  {
+			m_conflictClause[size++] = lit1;
+			pushed[Lit(lit1)>>1] = true;
+			--elements;
+
+#ifdef ANADEBUG
+			std::cout << "push into c-clause: " << getLit(lit1) << std::endl;
+#endif
+			if( m_level[Lit(lit1)>>1] == curDLevel )
+			  { ++elements; }
+		  }
+		
+		// Analyse the next clause.
+		goto NEXT_CLAUSE;
+	  }
+
+	// Perform conflict analysis according to the 1UIP scheme.
+	do
+	  {
+		++resolutions;
+
+		assert( isUniversal(conflictingClause[0]) == cube );
+
+		// Initialization.
+		lit = conflictingClause[length]; 
+
+		// Analyze the literals of the current non-binary conflicting clause.
+		do
+		  {
+			// Get the index of "lit".
+			unsigned int index(Lit(lit) >> 1); 
+
+#ifdef ANADEBUG
+			std::cout << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << "checked: " << checked[Lit(lit)] << "," << checked[Lit(lit)^1] << " mlevel: " << m_level[index] << " qlevel: " << q_level[index] << " qreason: " << q_reason[Lit(lit)>>1];
+#endif
+
+			// "lit" not checked so far?
+			if ( !checked[Lit(lit)] )
+			  {
+				// If we already have checked the literal with the opposite polarity, we have a tautology clause
+				// This may only happen with universal literal
+
+				// Update "checked".
+				checked[Lit(lit)] = true;
+
+
+				if( !m_assignment[Lit(lit)] && ( m_level[index] > 0 || !m_assignment[Lit(lit)^1] ) && ( !checked[Lit(lit)^1] || isUniversal( lit ) != cube ) )
+				  { 
+
+					// Increase the activity of the variable corresponding to "lit".
+					increaseActivityVSIDS(index);
+
+					// Has "lit" been assigned on the current decision level?
+					if ( m_level[index] == curDLevel || ( resolvemode && q_level[index] > resolvelevel ) )
+					  { 
+
+						// if "lit" is pure, it is also part of the learned clause
+						if( isPureOrDC(lit) || isUniversal(lit) != cube ) 
+						  {
+							m_conflictClause[size++] = lit;
+							pushed[index] = true;
+
+							if( m_level[index] == curDLevel )
+							  { 
+								++elements; 
+#ifdef ANADEBUG
+								std::cout << " ++el-pure: " << elements;
+#endif
+							  }
+#ifdef ANADEBUG
+							std::cout << " push into c-clause: " << getLit(lit);
+#endif
+							
+							if( !m_assignment[Lit(lit)^1] || m_level[index] == curDLevel )
+							  { --elements; }
+						  }
+						else if( resolvemode && m_level[index] < finalmlevel )
+						  {
+							--elements;
+							toresolve = true;
+
+							m_conflictClause[size++] = lit;
+							pushed[index] = true;
+
+							if( m_level[index] == curDLevel )
+							  { 
+								++elements; 
+#ifdef ANADEBUG
+								std::cout << " ++el-res: " << elements;
+#endif
+							  }
+
+#ifdef ANADEBUG
+							std::cout << " push into c-clause: " << getLit(lit);
+#endif
+
+							if( q_level[Lit(lit)>>1] < resolvelevel )
+							  { 
+								resolvelevel = q_level[Lit(lit)>>1]; 
+							  }
+						  }
+						++elements;
+#ifdef ANADEBUG
+						std::cout << " ++el-end: " << elements;
+#endif
+					  }
+					else if ( ( m_level[index] > 0 || (!m_assignment[Lit(lit)] && !m_assignment[Lit(lit)^1]) ) )
+					  {
+						// What about the decision level "lit" has been assigned on?
+						// Checking the decision level on which a particular variable has been 
+						// assigned, requires that assumptions are stored on decision levels 
+						// greater 0. Otherwise we run into problems in the incremental mode. 
+						m_conflictClause[size++] = lit; 
+						pushed[index] = true;
+
+#ifdef ANADEBUG
+						std::cout << " push into c-clause: " << getLit(lit);
+#endif
+					  }
+
+					// If we have already checked the opposite assignment of a literal, we have to resolve additional variables.
+					// testing : also resolve if literal is unassigned
+					if( !m_assignment[Lit(lit)^1] && m_level[Lit(lit)>>1] > 0)
+					  { 
+						assert( isUniversal(lit) != cube );
+						if( q_level[index] < resolvelevel )
+						  {
+							resolvelevel = q_level[index];
+#ifdef ANADEBUG
+							std::cout << " RESOLVE until level " << resolvelevel;
+#endif
+							toresolve = true;
+						  }
+					  }
+				  }
+			  }
+#ifdef ANADEBUG
+			std::cout << std::endl;
+#endif
+			// Increment "length".
+			++length;
+
+			// Get the next literal to be checked.
+			lit = conflictingClause[length]; 
+
+		  } while (lit != 0); 
+
+	  NEXT_CLAUSE:
+
+		// Determine the next clause to be processed.
+		while ( !checked[ Lit(m_decisionStack[pos])^1 ] && ( m_level[Lit(m_decisionStack[pos])>>1] >= finalmlevel || isDC(m_decisionStack[pos]) ) ) 
+		  { --pos; }
+
+		if( (m_level[Lit(m_decisionStack[pos])>>1] == 0 || m_level[Lit(m_decisionStack[pos])>>1] < finalmlevel ) && !isDC(m_decisionStack[pos]) )
+		  { break; }
+
+#ifdef ANADEBUG
+		std::cout << getLit(m_decisionStack[pos]) << " elements: " << elements << " checked: " << checked[Lit(m_decisionStack[pos])] << "," << checked[Lit(m_decisionStack[pos])^1] << std::endl;
+#endif
+
+		if( resolvemode )
+		  {
+			if( m_decisionStack[pos] == 0 ) 
+			  { break; }
+
+			if( !isDC(m_decisionStack[pos]) && m_level[Lit(m_decisionStack[pos])>>1] < curDLevel && m_level[Lit(m_decisionStack[pos])>>1] >= finalmlevel )
+			  { 
+#ifdef ANADEBUG
+				std::cout << "new curlevel: " << curDLevel << std::endl;
+#endif
+				curDLevel = m_level[Lit(m_decisionStack[pos])>>1]; 
+			  }
+
+			if( pushed[Lit(m_decisionStack[pos])>>1] || ( checked[Lit(m_decisionStack[pos])] && checked[Lit(m_decisionStack[pos])^1] ) )
+			  { 
+#ifdef ANADEBUG
+				std::cout << "skip: " << getLit(m_decisionStack[pos]) << std::endl;
+#endif
+
+#if 0 // Setting uip to 0 leads to problems, somehow. But other solution maybe also not correct
+				if( pushed[Lit(m_decisionStack[pos])>>1] )
+				   { uip = m_decisionStack[pos]; }
+				 else
+				   { uip = 0; }
+#else
+				uip = m_decisionStack[pos];
+#endif
+				
+				--pos;
+
+				goto NEXT_CLAUSE; 
+			  }
+
+			if( elements == 1 && q_level[Lit(m_decisionStack[pos])>>1] > resolvelevel )
+			  { ++elements; }
+		  }
+
+		if( isUniversal(m_decisionStack[pos]) != cube && ( m_forcing[Lit(m_decisionStack[pos])>>1] != NULL || m_binForcing[Lit(m_decisionStack[pos])>>1] != 0) )
+		  {
+			uip = m_decisionStack[pos];
+			--elements;
+			if( elements == 0 )
+			  { break; }
+			--pos;
+			goto NEXT_CLAUSE;
+		  }
+
+		// stop if we receive a literal on deeper DL, except if we have reached a DC lit
+		if( ( m_level[Lit(m_decisionStack[pos])>>1] < curDLevel ) && !isDC(m_decisionStack[pos]) )
+		  { break; }
+
+		uip = m_decisionStack[pos];
+
+#ifdef ANADEBUG
+		std::cout << "next uip: " << getLit(uip) << (isUniversal(uip)?" (u) ":" (e) ") << "mlevel: " << m_level[Lit(uip)>>1] << " qlevel: " << q_level[Lit(uip)>>1] << " pos: " << pos << std::endl;
+#endif
+
+		// Do we have a binary forcing clause?
+		if ( m_binForcing[Lit(uip) >> 1] != 0 )
+		  {
+			// Get the "second" literal (not the one equal to "uip").
+			unsigned int L(m_binForcing[Lit(uip) >> 1]); 
+
+#ifdef ANADEBUG
+			std::cout << "is bin with " << getLit(L) << " on level " << curDLevel << std::endl;
+#endif
+			checked[Lit(uip)] = true;
+
+			if( resolvemode && q_level[Lit(uip)>>1] >= resolvelevel )
+			  { uip = L^1; }
+					
+			// "L" not checked so far?
+			if (!checked[Lit(L)])
+			  {
+				// Update "checked".
+				checked[Lit(L)] = true;
+
+				// Increase the activity of the variable corresponding to "L".
+				increaseActivityVSIDS(Lit(L) >> 1);
+
+				// Increment "elements", assuming that both literals of the binary 
+				// forcing clause have been assigned on the current decision level.
+				assert(m_level[Lit(L) >> 1] == curDLevel);
+
+				// Add pure lits.
+				if( isPureOrDC(L) || isUniversal(L) != cube ) 
+				  {
+					m_conflictClause[size++] = L;
+					pushed[Lit(L)>>1] = true;
+
+					if( m_level[Lit(L)>>1] == curDLevel )
+					  { ++elements; }
+#ifdef ANADEBUG
+					std::cout << "push into c-clause: " << getLit(L) << std::endl;
+#endif
+					--elements;
+				  }
+				++elements;
+			  }
+
+			// Update the status variables.
+			--pos;
+			--elements;
+			length = 0;
+
+			if( elements == 0 )
+			  { 
+				uip = L^1;
+				break; 
+			  }
+
+			// Analyse the next clause.
+			goto NEXT_CLAUSE;
+		  }
+	  
+		// Update the status variables.
+		conflictingClause = m_forcing[Lit(uip) >> 1];
+
+		--pos;
+		--elements;
+		length = 0;
+
+#ifdef ANADEBUG
+		std::cout << "next conflictclause: " << std::endl;
+		printClause(conflictingClause, true);
+		std::cout << std::endl << "elements: " << elements << std::endl;
+#endif
+
+		if( conflictingClause == NULL && elements != 0 )
+		  {
+			/* skip universal/existential and/or pure literals collected during implication graph proceeding*/
+			if( isUniversal(uip) != cube || isPureOrDC(uip) )
+			  {
+				++elements;
+				if( elements == 0 )
+				  { break; }
+			  }
+			else if( resolvemode )
+			  {
+				if( q_level[Lit(uip)>>1] < resolvelevel )
+				  { 
+					m_conflictClause[size++] = uip^1; 
+					pushed[Lit(uip)>>1] = true;
+#ifdef ANADEBUG
+					std::cout << "push into c-clause: " << getLit(uip^1) << std::endl;
+#endif
+				  }
+				else 
+				  { ++elements; }
+			  }
+				
+			goto NEXT_CLAUSE;
+		  }
+		
+		// resolve cubes as long as possible
+		if( ( resolveonlyuip || ( cube && (elements==0 ) ) ) && conflictingClause != NULL)
+		  { 
+			++elements; 
+			resolveonlyuip = false;
+		  }
+	  } while ( elements > 0 );
+  
+	/* 
+	   check if we have to do additional resolution steps for our conflictclause:
+	   - is there a universal literal which would be unassigned?
+	   - are there more than one existential/universal literals assigned at the backtracklevel?
+	*/
+
+	// reset status variables
+	maxmat = size;
+	maxemlevelat = size;
+	maxeqlevel = 0;
+	maxuqlevel = 0;
+	maxmlevel = 0;
+	uipinclause = false;
+	resolveonlyuip = false;
+
+#ifdef ANADEBUG
+	std::cout << "uip: " << getLit(uip) << (isUniversal(uip)?" (u) ":" (e) ") << " mlevel: " << m_level[Lit(uip)>>1] << " qlevel: " << q_level[Lit(uip)>>1] << std::endl;
+#endif
+
+	for( unsigned int i = 0; i < size; ++i )
+	  {
+		unsigned int lit = m_conflictClause[i];
+
+#ifdef ANADEBUG
+		std::cout << i << ": " << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << " mlevel: " << m_level[Lit(lit)>>1] << " qlevel: " << q_level[Lit(lit)>>1];
+#endif
+
+		if( uip == (lit^1) )
+		  {
+#ifdef ANADEBUG
+			std::cout << " uip in cl " << getLit(uip);
+#endif
+			uipinclause = true;
+		  }
+
+		if( isUniversal(lit) == cube )
+		  {
+
+			if( m_level[Lit(lit)>>1] == maxmlevel )
+			  {
+				maxemlevelat = i;
+			  }
+
+			if( m_level[Lit(lit)>>1] > maxmlevel )
+			  { 
+				maxmlevel = m_level[Lit(lit)>>1];
+				maxmat = i;
+				
+#ifdef ANADEBUG
+				std::cout << " new maxmlevel: " << m_level[Lit(m_conflictClause[maxmat])>>1];
+#endif
+			  }
+
+			if( q_level[Lit(lit)>>1] > maxeqlevel ) 
+			  { 
+				maxeqlevel = q_level[Lit(lit)>>1]; 
+#ifdef ANADEBUG
+				std::cout << " new maxeqlevel: " << maxeqlevel;
+#endif
+			  }
+		  }
+		else if( q_level[Lit(lit)>>1] > maxuqlevel )
+		  {
+			maxuqlevel = q_level[Lit(lit)>>1]; 
+#ifdef ANADEBUG
+			std::cout << " new maxuqlevel: " << maxuqlevel;
+#endif
+		  }
+		
+#ifdef ANADEBUG
+		std::cout << std::endl;
+#endif
+	  }
+
+	if( !uipinclause && (uip != 0) )
+	  {
+#ifdef ANADEBUG
+		std::cout << getLit(uip) << (isUniversal(uip)?" (u) ":" (e) ") << " mlevel: " << m_level[Lit(uip)>>1] << " qlevel: " << q_level[Lit(uip)>>1];
+#endif
+
+		m_conflictClause[size++] = uip^1;
+		pushed[Lit(uip)>>1] = true;
+
+		if( isUniversal(uip) == cube )
+		  {
+			if( m_level[Lit(uip)>>1] == maxmlevel )
+			  {
+				maxemlevelat = size-1;
+			  }
+
+			if( m_level[Lit(uip)>>1] > maxmlevel )
+			  {
+				maxmlevel = m_level[Lit(uip)>>1];
+				maxmat = size-1;
+#ifdef ANADEBUG
+				std::cout << " new maxmlevel: " << m_level[Lit(m_conflictClause[maxmat])>>1];
+#endif
+			  }
+
+			if( q_level[Lit(uip)>>1] > maxeqlevel ) 
+			  { 
+				maxeqlevel = q_level[Lit(uip)>>1]; 
+#ifdef ANADEBUG
+				std::cout << " new maxeqlevel: " << maxeqlevel;
+#endif
+			  }
+		  }
+		else 
+		  {	
+			if( q_level[Lit(uip)>>1] > maxuqlevel )
+			  {
+				maxuqlevel = q_level[Lit(uip)>>1]; 
+#ifdef ANADEBUG
+				std::cout << " new maxuqlevel: " << maxuqlevel;
+#endif
+			  }
+		  }
+#ifdef ANADEBUG
+		std::cout << std::endl;
+#endif
+	  }
+
+#ifdef ANADEBUG
+	std::cout << "maxeqlevel: " << maxeqlevel << " maxuqlevel: "  << maxuqlevel << " maxmat: " << maxmat << " maxemlevelat: " << maxemlevelat << " size: " << size;
+	if( maxmat < size )
+	  { std::cout << " maxmlevlit: " << getLit(m_conflictClause[maxmat]) << " maxmlevel: " << m_level[Lit(m_conflictClause[maxmat])>>1]; }
+	std::cout << std::endl;
+#endif
+
+	if ( (maxmat >= size) || (maxmlevel <= m_rootLevel) )
+	  { 
+		if( cube )
+		  {
+			for( unsigned int s = 0; s != q_solutioncube.size(); ++s )
+			  { q_solutioncube[s] = 0; }
+			for( unsigned int c = 0; c != size; ++c )
+			  { 
+				q_solutioncube[Lit(m_conflictClause[c])>>1] = m_conflictClause[c]^1; }
+		  }
+		return false;
+	  }
+
+	/* if no universal/existential variable is in the clause there will be no problems with implications */
+	if( maxuqlevel != 0 || checkclause )
+	  {
+		checkclause = true;
+		unsigned int maxmlit = m_conflictClause[maxmat];
+		for(unsigned int i = 0; i < size; ++i )
+		  {
+			unsigned int lit(m_conflictClause[i]);
+#ifdef ANADEBUG
+			std::cout << i << ": " << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << " mlevel: " << m_level[Lit(lit)>>1] << " qlevel: " << q_level[Lit(lit)>>1] << std::endl;
+#endif		
+
+			if( ( isUniversal(lit) != cube && q_level[Lit(lit)>>1] < q_level[Lit(m_conflictClause[maxmat])>>1] && ( m_level[Lit(lit)>>1] == 0 || m_level[Lit(lit)>>1] > maxmlevel ) ) || 
+				( maxmat != i && m_level[Lit(lit)>>1] == m_level[Lit(maxmlit)>>1] ) )
+			  {
+				if( isUniversal(maxmlit) != cube && resolvelevel > q_level[Lit(maxmlit)>>1])
+				  {
+					resolvelevel = q_level[Lit(maxmlit)>>1];
+#ifdef ANADEBUG
+					std::cout << "set resolvelevel: " << resolvelevel << std::endl;
+#endif
+				  }
+				if( isUniversal(lit) != cube && resolvelevel > q_level[Lit(lit)>>1])
+				  {
+					resolvelevel = q_level[Lit(lit)>>1];
+#ifdef ANADEBUG
+					std::cout << "set resolvelevel: " << resolvelevel << std::endl;
+#endif
+				  }
+
+				if( isUniversal(lit) != isUniversal(maxmlit) )
+				  {
+					if( maxemlevelat < size )
+					  {
+						if( m_forcing[Lit(maxmlit)>>1] == NULL && m_binForcing[Lit(maxmlit)>>1] == 0 )
+						  {
+							uip = m_conflictClause[maxemlevelat]^1; 
+							m_conflictClause[maxemlevelat] = m_conflictClause[--size];
+							pushed[Lit(uip)>>1] = false;
+							resolveonlyuip = true;
+						  }
+						else
+						  {
+							uip = maxmlit^1;
+							m_conflictClause[maxmat] = m_conflictClause[--size];
+							pushed[Lit(uip)>>1] = false;
+							resolveonlyuip = true;
+						  }
+					  }
+					else if( isUniversal(lit) != cube )
+					  { uip = maxmlit^1; }
+					else
+					  {	uip = lit^1; }
+				  }
+				else if( m_forcing[Lit(lit)>>1] == NULL && m_binForcing[Lit(lit)>>1] == 0 )
+				  {
+					//assert( m_forcing[Lit(maxmlit)>>1] == NULL && m_binForcing[Lit(maxmlit)>>1] == 0 );
+					uip = maxmlit^1; 
+					m_conflictClause[maxmat] = m_conflictClause[--size];
+					pushed[Lit(uip)>>1] = false;
+					resolveonlyuip = true;
+				  }
+				else
+				  {
+					uip = lit^1;
+					m_conflictClause[i] = m_conflictClause[--size];
+					pushed[Lit(uip)>>1] = false;
+					resolveonlyuip = true;
+				  }
+				
+				toresolve = true;
+#ifdef ANADEBUG
+				std::cout << "resolve the uip: " << getLit(uip) << std::endl;
+#endif
+				break;
+			  }
+		  }
+	  }
+
+	// Should we resolve additional variables?
+	if( toresolve )
+	  {
+#ifdef EXOUTPUT
+		std::cout << "'";
+#endif
+
+		elements = 0;
+		finalmlevel = m_decisionLevel;
+		unsigned int maximpllit(0);
+
+		if( (uip != 0) && (resolveonlyuip || (q_level[Lit(uip)>>1] < resolvelevel && isUniversal(uip) == cube ) ) )
+		  {
+
+#ifdef ANADEBUG
+			std::cout << "resolveonlyuip: " << getLit(uip) << std::endl;
+#endif
+			++elements;
+			finalmlevel = m_level[Lit(uip)>>1]; 
+			maximpllit = uip;
+		  }
+
+		for( unsigned int i = 0; i < size; ++i )
+		  {
+
+			unsigned int canlit(m_conflictClause[i]);
+			if( q_level[Lit(canlit)>>1] >= resolvelevel )
+			  {
+#ifdef ANADEBUG
+				std::cout << "candidate: " << getLit(canlit) << " ";
+#endif
+
+				if( isUniversal(canlit) == cube && ( m_forcing[Lit(canlit)>>1] != NULL || m_binForcing[Lit(canlit)>>1] != 0 ) )
+				  { 
+					if( !isPureOrDC(canlit) )
+					  { ++elements; }
+
+					if( m_level[Lit(canlit)>>1] < finalmlevel && m_level[Lit(canlit)>>1] != 0 )
+					  { 
+						finalmlevel = m_level[Lit(canlit)>>1]; 
+					  }
+
+					if( m_level[Lit(maximpllit)>>1] < m_level[Lit(canlit)>>1] )
+					  {
+						maximpllit = canlit^1;
+					  }
+#ifdef ANADEBUG
+					std::cout << "resolve: " << getLit(canlit) << (isUniversal(canlit)?" (u) ":" (e) ") << "mlevel: "<< m_level[Lit(canlit)>>1] << " qlevel: " << q_level[Lit(canlit)>>1] << std::endl 
+							  <<" maximpllit: " << getLit(maximpllit) << " finalmlevel: " << finalmlevel << " elements: " << elements << std::endl;
+#endif
+					pushed[Lit(canlit)>>1] = false;
+				  }
+				else
+				  {
+					assert( q_level[Lit(canlit)>>1] >= resolvelevel );
+#ifdef ANADEBUG
+					std::cout << "remove: " << getLit(canlit) << (isUniversal(canlit)?" (u) ":" (e) ") << "mlevel: "<< m_level[Lit(uip)>>1] << " qlevel: " << q_level[Lit(canlit)>>1] << std::endl;
+#endif
+					pushed[Lit(canlit)>>1] = true;
+				  }
+
+				checked[Lit(canlit)] = true;
+				m_conflictClause[i--] = m_conflictClause[--size];
+			  }
+		  }
+
+#ifdef ANADEBUG
+		std::cout << "elements: " << elements << std::endl;
+		std::cout << "mlevel maximpllit: " << m_level[Lit(maximpllit)>>1] << " mlevel uip: " << m_level[Lit(uip)>>1] << std::endl;
+#endif
+		if( elements > 0 )
+		  { 
+
+
+			if( m_level[Lit(maximpllit)>>1] > m_level[Lit(uip)>>1] )
+			  { uip = maximpllit; } 
+
+#ifdef ANADEBUG
+			std::cout << "bf uip: " << getLit(uip) << " m_ds: " << getLit(m_decisionStack[pos]) << " (" << pos << ")" << std::endl;
+#endif
+
+			pos = m_dsEndIndex-1;
+			
+			// Determine the next clause to be processed.
+			while ( m_level[Lit(m_decisionStack[pos])>>1] > m_level[Lit(maximpllit)>>1] || isDC(Lit(m_decisionStack[pos])) ) 
+			  { 
+#ifdef ANADEBUG
+				std::cout << "-- " << getLit(m_decisionStack[pos]) << (isUniversal(m_decisionStack[pos])?" (u) ":" (e) ") << "mlevel: " << m_level[Lit(m_decisionStack[pos])>>1] << " qlevel: " << q_level[Lit(m_decisionStack[pos])>>1] << " pos: " << pos << std::endl;
+#endif
+				--pos; 
+			  }
+
+			curDLevel = m_level[Lit(m_decisionStack[pos])>>1];
+
+#ifdef ANADEBUG
+			std::cout << "uip: " << getLit(uip) << " m_ds: " << getLit(m_decisionStack[pos]) << " (" << pos << ")" << std::endl;
+#endif
+
+			toresolve = false;
+			resolvemode = true;
+
+			goto NEXT_CLAUSE;
+		  }
+	  }
+
+	assert( uip != 0 );
+	// Flip the sign of the UIP.
+	uip = uip ^ 1;
+
+	maxmlevel = 0;
+
+	unsigned int maxqExistLevel(0);
+
+	// Perform a simple conflict clause minimization step. See also "Towards Understanding 
+	// and Harnessing the Potential of Clause Learning" by Beame, Kautz, and Sabharwal.
+	for (unsigned int l = 0; l < size; ++l)
+	  {
+		// Get the next literal of "clause".
+		unsigned int lit(m_conflictClause[l]); 
+
+#ifdef EXDEBUG
+		std::cout << l << ": " << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << " mlevel: " << m_level[Lit(lit)>>1] << " qlevel: " << q_level[Lit(lit)>>1] << std::endl;
+#endif
+
+		// always minimize conflicts. Minimize cube only if "q_mincube" is true
+		if( !cube || q_mincube )
+		  {
+			// Get the non-binary forcing clause of "lit".
+			unsigned int* fc(m_forcing[Lit(lit) >> 1]);
+
+			// Do we talk about an implication caused by a non-binary clause?
+			if (fc != NULL)
+			  {	      
+				// Check whether all literals of "fc" have been processed during conflict analysis. 
+				// In this particular case we are allowed to remove "lit" from the conflict clause.
+				do
+				  {
+					// Do we have to keep "lit"?
+					if (!checked[Lit(*fc)] && m_level[Lit(*fc) >> 1] > 0)
+					  { break; }
+
+					// Increment "fc".
+					++fc; 
+				  }
+				while (*fc != 0);
+	      
+				// Is it safe to remove "lit"?
+				if (*fc == 0)
+				  {
+#ifdef ANADEBUG
+					std::cout << "remove lit (forced by other literals in clause): " << getLit(lit) << std::endl;
+#endif
+					m_conflictClause[l--] = m_conflictClause[--size];
+					continue;
+				  }
+			  }
+			else
+			  {
+				// Do we have an implication caused by a binary clause?
+				if (m_binForcing[Lit(lit)>>1] != 0 && checked[Lit(m_binForcing[Lit(lit)>>1])])
+				  {
+					// At this point, it's safe to remove "lit".
+#ifdef ANADEBUG
+					std::cout << "remove lit (forced by other literals in clause): " << getLit(lit) << std::endl;
+#endif
+					m_conflictClause[l--] = m_conflictClause[--size];
+					continue;
+				  }
+			  }
+		  }
+
+		if( isUniversal(lit) == cube )
+		  {
+			if( m_level[ Lit(lit)>>1 ] > maxmlevel && 
+				q_level[ Lit(lit) >> 1 ] < resolvelevel )
+			  { 
+				uipat = l; 
+				maxmlevel = m_level[Lit(lit)>>1];
+			  }
+
+			if( q_level[Lit(lit)>>1] > maxqExistLevel )
+			  { 
+				maxqExistLevel = q_level[Lit(lit)>>1]; 
+			  }
+		  }
+	  }
+
+	maxeqlevel = maxqExistLevel;
+
+	// set uip to right position
+	uip = m_conflictClause[uipat];
+
+#ifdef ANADEBUG
+	std::cout << "uip: " << getLit(uip) << std::endl;
+#endif
+
+	// Do we have an empty clause?
+	if ( size == 1 )
+	  {
+	  EMPTYCLAUSE:
+
+#ifdef ANADEBUG
+		std::cout << "emptyclause " << std::endl;
+#endif
+		
+		// do we have a universal unit clause (existential unit term)
+		// or do we want to flip a literal on decision level 0?
+		if( (isUniversal(uip) != cube) || (m_level[Lit(uip)>>1] == 0) )
+		  { 
+			if( cube )
+			  {
+				for( unsigned int s = 0; s != q_solutioncube.size(); ++s )
+				  { q_solutioncube[s] = 0; }
+				for( unsigned int c = 0; c != size; ++c )
+				  { q_solutioncube[Lit(m_conflictClause[c])>>1] = m_conflictClause[c]^1; }
+			  }
+			return false; 
+		  }
+		
+		if( m_level[Lit(uip)>>1] <= m_rootLevel )
+		  { 
+			if( cube )
+			  {
+				for( unsigned int s = 0; s != q_solutioncube.size(); ++s )
+				  { q_solutioncube[s] = 0; }
+				for( unsigned int c = 0; c != size; ++c )
+				  { q_solutioncube[Lit(m_conflictClause[c])>>1] = m_conflictClause[c]^1; }
+			  }
+			return false; 
+		  }
+
+#ifdef OUTPUT
+		std::cout << "U";
+#else 
+#ifdef STATS
+		std::cout << "U";
+#endif
+
+#endif
+
+		// unresolvable conflict (with or without assumptions)
+		if( m_decisionLevel == q_backtracklevel )
+		  { m_emptyClause = true; }
+
+#ifdef COMBSOLVER		
+
+		if( impl.units.empty() )
+		  {
+			backtrack(q_backtracklevel);
+			setUnit(uip);
+			addImplication(uip, NULL );
+			return true;
+		  }
+
+		impl.backtracklevel = m_rootLevel;
+		impl.unitclause = true;
+		impl.units.push_back( std::pair<unsigned int, unsigned int>(uip, m_rootLevel));
+		unsigned int* aigconflict = NULL;
+		if( (aigconflict = checkimpl(impl )) != NULL )
+		  { return analyze( aigconflict ); }
+#else
+		backtrack(q_backtracklevel);
+
+		if(cube)
+		  { 
+			++m_ttlbd; 
+		  }
+		else
+		  { ++m_tlbd; }
+
+		// Add the UIP as an implication to the decision stack.
+
+		setUnit(uip);
+		addImplication(uip, NULL); 
+#endif
+
+		q_newunit = true;
+
+		return true;
+	  }
+
+	// Initialization.
+	unsigned int lbd(1);
+	unsigned int esize(0);
+	unsigned int lv(m_rootLevel);
+	unsigned int at(0);
+
+	std::vector<bool> level;
+	level.resize(m_decisionLevel + 1, false);
+
+	if( cube )
+	  { esize = sortCubeUE( m_conflictClause, size, maxeqlevel ); }
+	else
+	  { esize = sortClauseEU( m_conflictClause, size, maxeqlevel ); }
+
+#ifdef ANADEBUG
+	std::cout << "esize: " << esize << " size: " << size << std::endl;
+#endif
+
+	if( esize == 0 || size == 1 )
+	  { goto EMPTYCLAUSE; }
+
+	// Did we have a binary conflicting clause?
+	if( size == 2 && !cube )
+	  {
+		assert( uip == m_conflictClause[0] || uip == m_conflictClause[1] );
+		unsigned int forcebinlit(m_conflictClause[0]);
+
+		if( uip == forcebinlit )
+		  { forcebinlit = m_conflictClause[1]; }
+
+#ifdef DEBUG
+		std::cout << "ana-binclause: " << getLit(m_conflictClause[0]) << " [" << assignedTo(m_conflictClause[0]) << "] " << getLit(m_conflictClause[1]) << " [" << assignedTo(m_conflictClause[1]) << "]" << std::endl;
+#endif
+		// Store the clause "(lhbrLit, m_decisionStack[i])".
+		m_binWatches[uip].push_back(forcebinlit);
+		m_binWatches[Lit(forcebinlit)].push_back(uip);
+
+		m_tlbd +=1;
+
+		increaseActivityDLCS(Lit(m_conflictClause[0])>>1);
+		increaseActivityDLCS(Lit(m_conflictClause[1])>>1);
+		increaseActivityQuBE(Lit(m_conflictClause[0]));
+		increaseActivityQuBE(Lit(m_conflictClause[1]));
+
+#ifdef COMBSOLVER
+		unsigned int declevel = m_level[Lit(forcebinlit)>>1];
+
+		if( impl.units.empty() )
+		  {
+			backtrack(declevel);
+			setUnit(uip);
+			addBinImplication(uip, forcebinlit); 
+			return true;
+		  }
+		
+		if( impl.backtracklevel > (int)declevel )
+		  { impl.backtracklevel = declevel; }
+
+		impl.units.push_back(std::pair<unsigned int, unsigned int>(uip, declevel ) );
+		impl.binimpl[uip] = forcebinlit;
+
+		unsigned int* aigconflict = NULL;
+		if( (aigconflict = checkimpl(impl)) != NULL )
+		  { return analyze( aigconflict ); }
+
+#else
+		unsigned int binlv = m_level[Lit(forcebinlit)>>1];
+		backtrack(binlv); 
+		setUnit(uip);
+		addBinImplication(uip,forcebinlit);
+#endif
+
+#ifdef OUTPUT
+		std::cout << "B";
+#endif
+
+		++m_clausesDynamic;
+		++m_clausesDynamicBinary;
+		++m_clausesBinary;
+		++m_clauses;
+
+		return true;
+	  }
+		
+	// Determine the backtrack level and the "Literals Blocks Distance".
+	// the uip is on first position
+	for (unsigned int l = 0; l < size; ++l)
+	  {
+		unsigned int lit(m_conflictClause[l]);
+
+#ifdef ANADEBUG
+		std::cout << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << "mlevel: " << m_level[Lit(lit)>>1] << " qlevel: " << q_level[Lit(lit)>>1] << " q_reason: " << q_reason[Lit(lit)>>1];
+#endif
+
+		if( lit == uip )
+		  {
+			assert( isUniversal(lit) == cube );
+			m_conflictClause[l] = m_conflictClause[0];
+			m_conflictClause[0] = lit;
+			if( at == 0 )
+			  { at = l; }
+#ifdef ANADEBUG
+			std::cout << " set uip to pos 0" << std::endl;
+#endif
+			continue;
+		  }
+
+		// Do we have to update the backtrack level?
+		/* skip universal/existential literals for backtracklevel */
+		if ( (m_level[Lit(lit) >> 1] > lv) && (m_level[Lit(lit)>>1] < m_level[Lit(uip)>>1]) )
+		  {
+			lv = m_level[Lit(lit) >> 1];
+			if( isUniversal(lit) == cube )
+			  { at = l; }
+#ifdef ANADEBUG
+			std::cout << " new lv: " << lv;
+#endif
+		  }
+#ifdef ANADEBUG
+		std::cout << std::endl;
+#endif
+
+		// Do we have to update the "Literals Blocks Distance"?
+		if (!level[m_level[Lit(lit) >> 1]])
+		  {
+			level[m_level[Lit(lit) >> 1]] = true;
+			++lbd;
+		  }
+	  }
+
+	//assert( at > 0 || isUniversal(m_conflictClause[1]) != cube );
+	if( at > 0 )
+	  { iter_swap(m_conflictClause.begin()+1, m_conflictClause.begin() + at); }
+
+#ifndef COMBSOLVER
+	backtrack(lv);
+#endif
+
+	/* At this point we have reached the correct backtracklevel */
+
+	// Initialization.
+	unsigned int* cptr(new unsigned int[size+1]); 
+	
+	pointToClause* ptc = new pointToClause( cptr, lbd, esize, size );
+
+	unsigned int q(0);
+
+#ifdef DEBUG
+	if(cube)
+	  { std::cout << "ana-cube: " << std::endl; }
+	else
+	  { std::cout << "ana-clause: " << std::endl; }
+#endif
+
+	unsigned long long sign(0);
+
+	// Copy all literals of "clause" to "cptr".
+	for (unsigned int l = 0; l < size; ++l)
+	  {
+		cptr[q++] = m_conflictClause[l]; 
+		sign |= 1ULL << ( (cptr[l]>>1) % 64);
+
+		increaseActivityDLCS(Lit(m_conflictClause[l])>>1);
+		increaseActivityQuBE(Lit(m_conflictClause[l]));
+
+#ifdef DEBUG
+		std::cout << getLit(m_conflictClause[l]);
+		if( uip == m_conflictClause[l] )
+		  { std::cout << "*"; }
+		std::cout << " [" << assignedTo(m_conflictClause[l]) << "] ";
+#endif
+
+	  }
+
+#ifdef DEBUG
+	std::cout << std::endl;
+#endif
+      
+	// Add the fial clause stopper.
+	cptr[q] = 0;
+
+#ifdef EXDEBUG
+	std::cout << "set watches: " << std::endl;
+#endif
+
+	
+	ptc->setSign(sign);
+	ptc->setWatches();
+	ptc->setID(nextClauseID());
+
+	if( cube )
+	  {
+#ifdef DEBUG
+		std::cout << "optimized cube: " << std::endl;
+		printClause(ptc->clause());
+		std::cout << std::endl;
+#endif
+		m_ttlbd += lbd;
+		if( !q_togglelearning || (lbd <= (m_ttlbd/m_cubes ) ) )
+		  {
+			q_cubeWatches[Lit(cptr[0])].push_back(ptc);
+			
+			if( esize != 1 )
+			  {
+				q_cubeWatches[Lit(cptr[1])].push_back(ptc); 
+			  }
+			
+			// Update "m_watches" for universal variable
+			if( esize < size ) 
+			  { 
+				q_cubeWatches[cptr[esize]].push_back(ptc); 
+			  }
+		  }
+		else
+		  {
+			//ptc->setLBD(0);
+#ifdef OUTPUT
+			std::cout << ">";
+#endif
+		  }
+		ptc->setSteps(esize);
+		q_solutionDatabase.push_back(ptc);
+		++m_cubes;
+	  }
+	else
+	  { 
+		m_tlbd += lbd;
+
+		// Update "m_watches".
+		m_learnedWatches[Lit(cptr[0])].push_back(ptc);
+
+#ifdef DEBUG
+		std::cout << "set watch for: " << getLit(cptr[0]) << std::endl;
+#endif
+	   
+		if( esize != 1 )
+		  {
+			m_learnedWatches[Lit(cptr[1])].push_back(ptc); 
+
+#ifdef DEBUG
+			std::cout << "set watch for: " << getLit(cptr[1]) << std::endl;
+#endif
+		  }
+
+		// Update "m_watches" for universal variable
+		if( esize < size ) 
+		  { 
+			m_learnedWatches[Lit(cptr[esize])].push_back(ptc); 
+#ifdef DEBUG
+			std::cout << "set watch for: " << getLit(cptr[esize]) << std::endl;
+#endif
+		  }
+		
+		ptc->setSteps(resolutions);
+		m_clauseDatabase.push_back(ptc);  
+		++m_clausesDynamic;
+		++m_clauses;
+	  }
+
+#ifdef EXDEBUG
+	printClause(ptc);
+#endif
+
+	//assert( !m_assignment[Lit(cptr[0])^1] || !m_assignment[Lit(cptr[1])^1] );
+
+#ifdef COMBSOLVER
+	if( impl.units.empty() )
+	  {
+		backtrack(lv);
+		setUnit(uip);
+		addImplication(uip, cptr); 
+		return true;
+	  }
+
+	if( impl.backtracklevel > (int)lv )
+	  { impl.backtracklevel = lv; }
+	
+	impl.units.push_back(std::pair<unsigned int, unsigned int>(uip, lv ) );
+	impl.naryimpl[uip] = ptc;
+
+	unsigned int* aigconflict = NULL;
+	if( (aigconflict = checkimpl(impl)) != NULL )
+	  { return analyze( aigconflict ); }
+	
+#else
+	setUnit(uip);
+	addImplication(uip, cptr); 
+#endif
+	
+	return true;
+  }
+
+
+#ifdef COMBSOLVER
+  // generate conflicting clause if AIGsolve returns unsatisfiable 
+  bool Core::analyzeAIG( Implications& impl )
+  {
+#ifdef ANADEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	++m_conflicts;
+
+	unsigned int pos = m_dsEndIndex-1;
+	unsigned int lit = m_decisionStack[pos];
+	unsigned int uip(0);
+	unsigned int size(0);
+
+	// collect all decisions so far
+	while( m_level[Lit(lit)>>1] != 0 || isDC(lit) )
+	  {
+#ifdef DEBUG
+		std::cout << getLit(lit) << " reason: " << q_reason[Lit(lit)>>1] << " mlevel: " << m_level[Lit(lit)>>1] << " next: "  << getLit(m_decisionStack[pos-1]) << " reason: " << q_reason[Lit(m_decisionStack[pos-1])>>1] << " mlevel: " << m_level[Lit(m_decisionStack[pos-1])>>1] << std::endl;
+#endif
+		if( !isPureOrDC(lit) && !isUnit(lit) )
+		  {
+			assert( m_level[ Lit(m_decisionStack[pos-1])>>1] != m_level[Lit(lit)>>1] );
+
+			if ( uip == 0 )
+			  {
+				if( !isUniversal(lit))
+				  {
+					uip = lit^1;
+#ifdef ANADEBUG
+					std::cout << "set uip: " << getLit(uip) << std::endl;
+#endif
+				  }
+			  }
+			else 
+			  {
+				m_conflictClause[size++] = lit^1;
+#ifdef ANADEBUG
+				std::cout << "push: " << getLit(lit^1) << std::endl;
+#endif
+			  }
+				
+		  }
+		lit = m_decisionStack[--pos];
+	  }
+
+	if( size == 0 && uip == 0 )
+	  { return false; }
+	sortClauseEU( m_conflictClause, size, m_level[uip>>1] );
+
+	unsigned int* cptr(new unsigned int[size+2]); 
+
+#ifdef ANADEBUG
+	std::cout << "ana-clause: " << std::endl;
+#endif
+	
+	cptr[0] = uip;
+#ifdef ANADEBUG
+	std::cout << getLit(uip) << "*" << " [" << assignedTo(uip) << "] ";
+#endif
+
+	unsigned int q(1);
+	
+	// Copy all literals of "clause" to "cptr".
+	for (unsigned int l = 0; l < size; ++l)
+	  {
+		cptr[q++] = m_conflictClause[l]; 
+#ifdef ANADEBUG
+		std::cout << getLit(m_conflictClause[l]) << " [" << assignedTo(m_conflictClause[l]) << "] ";
+#endif
+	  }
+	cptr[q] = 0;
+
+   return analyze(cptr, 0, impl);
+  }
+#endif
+}

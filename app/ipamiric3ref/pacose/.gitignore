@@ -1,0 +1,13 @@
+build/
+bin/
+Pacose.config
+Pacose.creator
+Pacose.creator.user
+Pacose.files
+Pacose.includes
+Pacose.cflags
+Pacose.cxxflags
+gmon.out
+Pacose.creator.user.4.10-pre1
+Main.cpp.minimal
+libs/libPacose.a

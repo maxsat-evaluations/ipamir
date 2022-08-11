@@ -1,0 +1,1051 @@
+#include "core.hpp"
+
+namespace quantom {
+
+  // immediately return true if a pure lit is found
+  bool Core::detectPure( unsigned int& pbcpp, std::set< unsigned int>& candidates, bool checkpure )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif 
+
+	
+	if( !checkpure )
+	  {
+		markClauses( pbcpp );
+		return false;
+	  }
+	
+	// First mark clauses as satisfied and collect candidates for watch search
+	// Then proceed candidate-list and search for new watched clauses 
+	// If no clause is found, the candidate is pure
+
+	do 
+	  {
+		// Proceed decision Stack
+		while( pbcpp != m_dsEndIndex )
+		  {
+			unsigned int lit( m_decisionStack[pbcpp++] );
+
+#ifdef EXDEBUG
+			std::cout << "look at: " << getLit(lit) << std::endl;
+#endif
+
+			if( isDC(lit) ) 
+			  {
+#ifdef DEBUG
+#ifndef COMBSOLVER
+				//std::cout << "check binmarkers of the dc-lit clauses" << std::endl;
+				for(unsigned int bd = 0; bd < m_binWatchesLearnedIndex[Lit(lit)]; ++bd )
+				  { assert( m_assignment[ Lit(m_binWatches[Lit(lit)][bd]) ] ); }
+#endif
+#endif
+				continue;
+			  }
+		
+#ifdef EXDEBUG
+			std::cout << "binwatches: " << std::endl;
+#endif
+
+			// Look at all original clauses in which "lit" occurs
+			// And search for unassigned literals -> candidates
+
+			// First check the binary clauses
+			//unsigned int bsize = (unsigned int)m_binWatches[Lit(lit)].size();
+
+			unsigned int bsize = m_binWatchesLearnedIndex[Lit(lit)];
+		
+			for( unsigned int b = 0; b < bsize; ++b )
+			  {
+				unsigned int blit = m_binWatches[Lit(lit)][b];
+#ifdef EXDEBUG
+				std::cout << "blit: " << getLit(blit) << " " << assignedTo(blit) << std::endl;
+#endif
+				/* don't care about literals assigned on dl 0 */
+				/* skip also dont touch literals */ 
+				if( ( ( m_assignment[Lit(blit)] || m_assignment[Lit(blit)^1] ) && m_level[Lit(blit)>>1] == 0 )
+					|| m_donttouch[Lit(blit)>>1] )
+				  { continue; }
+
+				// collect the unassigned lits, also collect pure lits to check if they are don't care 
+				// -> useful for solution analysis
+				if( !isDC(blit) && (isEPure(blit) || !m_assignment[ Lit(blit) ] ) && ( isUPure(blit) || !m_assignment[ Lit(blit)^1 ] ) )
+				  {
+					//assert( !m_binWatches[Lit(blit)].empty() );
+					assert( m_binWatchesLearnedIndex[Lit(blit)] != 0 );
+
+#ifdef EXDEBUG
+					std::cout << "binempty? " << m_binWatches[Lit(blit)].empty() << " occur.empty(): " << q_occur[Lit(blit)].empty() << std::endl;
+					if( !m_binWatches[Lit(blit)].empty() )
+					  { std::cout << "bin lit: " << getLit( m_binWatches[Lit(blit)][0] ) << " [" << assignedTo( m_binWatches[Lit(blit)][0]) << "] (" << isDC(m_binWatches[Lit(blit)][0]) << ") " << std::endl; }
+					if( !q_occur[Lit(blit)].empty() )
+					  { std::cout << "wl0: " << getLit(q_occur[Lit(blit)][0]->wl0) << " [" << assignedTo( q_occur[Lit(blit)][0]->wl0 ) << "] " 
+								  << "wla: " << getLit(q_occur[Lit(blit)][0]->wla) << " [" << assignedTo( q_occur[Lit(blit)][0]->wla ) << "] " << std::endl;
+					  }
+
+#endif
+
+					// Check the watch bin- and n-nary-clause
+					if( ( m_assignment[ Lit( m_binWatches[Lit(blit)][0] ) ] ) && 
+						( q_occur[ Lit(blit) ].empty() || 
+						  m_assignment[ Lit( q_occur[Lit(blit)][0]->wl0 ) ] || 
+						  m_assignment[ Lit( q_occur[Lit(blit)][0]->wla ) ] ) )
+					  { 
+#ifdef EXDEBUG
+						std::cout << "bin-candidate: " << getLit(blit) << std::endl;
+#endif
+						candidates.insert( blit ); 
+					  }
+				  }
+			  }
+			
+#ifdef EXDEBUG
+			std::cout << "n-nary watches: " << std::endl;
+#endif
+
+			// Now look at the n-nary clauses
+			unsigned int osize = (unsigned int)q_occur[Lit(lit)].size();		
+			for( unsigned int i = 0; i < osize; ++i )
+			  {
+				pointToClause* clause( q_occur[Lit(lit)][i] );
+				unsigned int lsize = (unsigned int)clause->litlist.size();
+
+#ifdef EXDEBUG
+				std::cout << i << " clause: ";
+				printClause(clause);
+				std::cout << getLit(clause->wl0) << " [" << assignedTo(clause->wl0) << "] " << getLit(clause->wl1) << " [" << assignedTo(clause->wl1) << "] " << getLit(clause->wla) << " [" << assignedTo(clause->wla) << "]" << std::endl;
+				bool mark(false);
+#endif
+
+				/* Mark clause: 
+				   wl0 - first existential literal that satisfies clause 
+				   wl1 - second existential literal that satisfies clause
+				   wla - first universal literal that satisfies clause
+				   on the decision stack
+				*/
+
+				/* is assigned lit existential? */
+				if( !isUniversal(lit) )
+				  {
+					unsigned int wl0 = clause->wl0;
+					/* assigned lit is not the first watched literal */
+					if( wl0 != lit )
+					  { 
+						/* if first watch literal is unassigned, mark clause with "lit" */
+						if( !m_assignment[ wl0 ] )
+						  { 
+
+							clause->wl0 = lit; 
+#ifdef EXDEBUG
+							mark = true;
+#endif
+							// update watchlist
+							if( clause->wl1 == lit )
+							  { 
+								/* just swap wl0 and wl1 */
+								clause->wl1 = wl0;
+							  }
+							else
+							  {  
+								/* lit was not a watchlit yet -> add as watchlit and remove wl0 from watchlit-list */
+								m_watches[lit].push_back( clause ); 
+						
+								/* delete old wl0 as watchlit */
+
+								unsigned int wl0size((unsigned int)m_watches[wl0].size());
+
+								for( unsigned int ws = 0; ws != wl0size; ++ws )
+								  {
+									if( m_watches[wl0][ws] == clause)
+									  {
+#ifdef EXDEBUG
+										std::cout << "remove clause from watchlist of " << getLit(wl0) << std::endl
+												  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+										m_watches[wl0][ws] = m_watches[wl0][--wl0size];
+										m_watches[wl0].pop_back();
+										break;
+									  }
+								  }
+							  }
+						  }
+						// is second literal assigned? If not, mark second literal with "lit"
+						else if( clause->wl1 != 0 && !m_assignment[clause->wl1] )
+						  { 
+							unsigned int wl1 = clause->wl1;
+
+							assert( wl1 != lit );
+
+							// update watchlist
+							m_watches[lit].push_back( clause ); 
+							
+							/* delete old wl1 as watchlit */
+
+							unsigned int wl1size((unsigned int)m_watches[wl1].size());
+							
+							for( unsigned int ws = 0; ws != wl1size; ++ws )
+							  {
+								if( m_watches[wl1][ws] == clause)
+								  {
+#ifdef EXDEBUG
+									std::cout << "remove clause from watchlist of " << getLit(wl1) << std::endl
+											  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+									m_watches[wl1][ws] = m_watches[wl1][--wl1size];
+									m_watches[wl1].pop_back();
+									break;
+								  }
+							  }
+						  					
+							clause->wl1 = lit; 
+#ifdef EXDEBUG
+							mark = true;
+#endif
+						  }
+					  }
+				  }
+				/* "lit" is universal, is universal watched lit assigned? if not, mark clause with "lit" */
+				else if( !m_assignment[Lit(clause->wla)] )
+				  {
+					unsigned int wla = clause->wla;
+					assert( wla != 0 && wla != lit );
+
+					// update watchlist
+					m_watches[Lit(lit)].push_back( clause );
+				
+					clause->wla = lit;
+				
+					/* delete old wla as watchlit */
+
+					unsigned int wlasize((unsigned int)m_watches[Lit(wla)].size());
+				
+					for( unsigned int ws = 0; ws != wlasize; ++ws )
+					  {
+						if( m_watches[Lit(wla)][ws] == clause)
+						  {
+#ifdef EXDEBUG
+							std::cout << "remove clause from watchlist of " << getLit(wla) << std::endl
+									  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+							m_watches[Lit(wla)][ws] = m_watches[Lit(wla)][--wlasize];
+							m_watches[Lit(wla)].pop_back();
+							break;
+						  }
+					  }
+
+#ifdef EXDEBUG
+					mark = true;
+#endif
+				  }
+
+#ifdef EXDEBUG
+				if( mark )
+				  { std::cout << "mark" << std::endl; }
+				std::cout << "proceed litlist for: ";
+				printClause( clause );
+#endif
+
+				/* if we've got an universal pure, we don't need to check the litlists */
+				if( isUPure(lit) )
+				  { continue; }
+				//proceed litlists in clauses
+				for( unsigned int j = 0; j < lsize; ++j )
+				  {
+					unsigned int watchlit = clause->litlist[j];
+
+					// Skip assigned literals in decision level 0
+					if( m_level[Lit(watchlit)>>1] == 0 && ( m_assignment[Lit(watchlit)] || m_assignment[Lit(watchlit)^1] ) )
+					  { continue; }
+#ifdef EXDEBUG
+					std::cout << "watchlit: [" << getLit(watchlit) << "] " << assignedTo(watchlit) << " reason: 0x" << std::hex << q_reason[Lit(watchlit)>>1] << std::dec << std::endl;				
+#endif
+
+					// collect the unassigned lits, also collect pure lits to check if they are don't care -> useful for solution analysis
+					//if( !isDC(watchlit) && ( isEPure(watchlit) || !m_assignment[ Lit(watchlit) ] ) && ( isUPure(watchlit) || !m_assignment[ Lit(watchlit)^1 ] ) )
+
+					if( ( !m_assignment[Lit(watchlit)] && !m_assignment[Lit(watchlit)^1] ) || // unassigned lit?
+						( !isDC(watchlit) && // Skip already declared DC lits
+						  ( ( isEPure(watchlit) && m_assignment[Lit(watchlit)] ) || // exist dc?
+							( isUPure(watchlit) && m_assignment[Lit(watchlit)^1] ) // universal dc?
+							)
+						  )
+						)
+					  {
+						assert( !q_occur[Lit(watchlit)].empty() );
+						// Check the watch bin- and n-nary-clause
+
+						if( ( (m_binWatchesLearnedIndex[Lit(watchlit)] == 0) || 
+							  m_assignment[ Lit( m_binWatches[Lit(watchlit)][0] ) ] ) && 
+							( m_assignment[ Lit( q_occur[Lit(watchlit)][0]->wl0 ) ] ||
+							  m_assignment[ Lit( q_occur[Lit(watchlit)][0]->wla ) ] ) )
+						  { 
+#ifdef EXDEBUG
+							std::cout << "candidate: " << getLit(watchlit) << std::endl;
+#endif
+							candidates.insert( watchlit ); 
+						  }
+					  }
+				  }
+			  }
+		  }
+		
+#ifdef EXDEBUG
+		std::cout << "Ready collecting candidates" << std::endl;
+#endif
+		  
+		// Now we got a set of candidates which are possibly pure / don't care
+		// Check first the binary then the n-nary clause lists for a new watch clauses
+
+		if ( checkPureCandidates( candidates ) )
+		  { return true; }
+	  }
+	while( pbcpp != m_dsEndIndex );
+
+  	return false;
+  }
+
+  void Core::markClauses( unsigned int& pbcpp )
+  {
+	do 
+	  {
+		// Proceed decision Stack
+		while( pbcpp != m_dsEndIndex )
+		  {
+			unsigned int lit( m_decisionStack[pbcpp++] );
+
+#ifdef EXDEBUG
+			std::cout << "n-nary watches: " << std::endl;
+#endif
+
+			// Now look at the n-nary clauses
+			unsigned int osize = (unsigned int)q_occur[Lit(lit)].size();		
+			for( unsigned int i = 0; i < osize; ++i )
+			  {
+				pointToClause* clause( q_occur[Lit(lit)][i] );
+
+#ifdef EXDEBUG
+				std::cout << "clause: ";
+				printClause(clause);
+				std::cout << getLit(clause->wl0) << " [" << assignedTo(clause->wl0) << "] " << getLit(clause->wl1) << " [" << assignedTo(clause->wl1) << "] " << getLit(clause->wla) << " [" << assignedTo(clause->wla) << "]" << std::endl;
+				bool mark(false);
+#endif
+
+				/* Mark clause: 
+				   wl0 - first existential literal that satisfies clause 
+				   wl1 - second existential literal that satisfies clause
+				   wla - first universal literal that satisfies clause
+				   on the decision stack
+				*/
+
+				/* is assigned lit existential? */
+				if( !isUniversal(lit) )
+				  {
+					unsigned int wl0 = clause->wl0;
+					/* assigned lit is not the first watched literal */
+					if( wl0 != lit )
+					  { 
+						/* if first watch literal is unassigned, mark clause with "lit" */
+						if( !m_assignment[ wl0 ] )
+						  { 
+
+							clause->wl0 = lit; 
+#ifdef EXDEBUG
+							mark = true;
+#endif
+							// update watchlist
+							if( clause->wl1 == lit )
+							  { 
+								/* just swap wl0 and wl1 */
+								clause->wl1 = wl0;
+							  }
+							else
+							  {  
+								/* lit was not a watchlit yet -> add as watchlit and remove wl0 from watchlit-list */
+								m_watches[lit].push_back( clause ); 
+						
+								/* delete old wl0 as watchlit */
+
+								unsigned int wl0size((unsigned int)m_watches[wl0].size());
+
+								for( unsigned int ws = 0; ws != wl0size; ++ws )
+								  {
+									if( m_watches[wl0][ws] == clause)
+									  {
+#ifdef EXDEBUG
+										std::cout << "remove clause from watchlist of " << getLit(wl0) << std::endl
+												  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+										m_watches[wl0][ws] = m_watches[wl0][--wl0size];
+										m_watches[wl0].pop_back();
+										break;
+									  }
+								  }
+							  }
+						  }
+						// is second literal assigned? If not, mark second literal with "lit"
+						else if( clause->wl1 != 0 && !m_assignment[clause->wl1] )
+						  { 
+							unsigned int wl1 = clause->wl1;
+
+							assert( wl1 != lit );
+
+							// update watchlist
+							m_watches[lit].push_back( clause ); 
+							
+							/* delete old wl1 as watchlit */
+
+							unsigned int wl1size((unsigned int)m_watches[wl1].size());
+							
+							for( unsigned int ws = 0; ws != wl1size; ++ws )
+							  {
+								if( m_watches[wl1][ws] == clause)
+								  {
+#ifdef EXDEBUG
+									std::cout << "remove clause from watchlist of " << getLit(wl1) << std::endl
+											  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+									m_watches[wl1][ws] = m_watches[wl1][--wl1size];
+									m_watches[wl1].pop_back();
+									break;
+								  }
+							  }
+						  					
+							clause->wl1 = lit; 
+#ifdef EXDEBUG
+							mark = true;
+#endif
+						  }
+					  }
+				  }
+				/* "lit" is universal, is universal watched lit assigned? if not, mark clause with "lit" */
+				else if( !m_assignment[Lit(clause->wla)] )
+				  {
+					unsigned int wla = clause->wla;
+					assert( wla != 0 && wla != lit );
+
+					// update watchlist
+					m_watches[Lit(lit)].push_back( clause );
+				
+					clause->wla = lit;
+				
+					/* delete old wla as watchlit */
+
+					unsigned int wlasize((unsigned int)m_watches[Lit(wla)].size());
+				
+					for( unsigned int ws = 0; ws != wlasize; ++ws )
+					  {
+						if( m_watches[Lit(wla)][ws] == clause)
+						  {
+#ifdef EXDEBUG
+							std::cout << "remove clause from watchlist of " << getLit(wla) << std::endl
+									  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+							m_watches[Lit(wla)][ws] = m_watches[Lit(wla)][--wlasize];
+							m_watches[Lit(wla)].pop_back();
+							break;
+						  }
+					  }
+
+#ifdef EXDEBUG
+					mark = true;
+#endif
+				  }
+			  }
+		  }
+	  } while( pbcpp != m_dsEndIndex );
+  }
+
+  bool Core::checkPureCandidates( std::set< unsigned int >& candidates )
+  {
+    for( std::set< unsigned int >::iterator it = candidates.begin(); it != candidates.end(); )
+      {
+		unsigned int clit = *it;
+
+#ifdef EXDEBUG
+		std::cout << "check candidate: " << getLit(clit) << " (" << q_reason[Lit(clit)>>1] << ")" << std::endl;
+#endif
+
+		candidates.erase( it++ );
+
+		/* testing: check ALL literals (regardless of being pure or not) if their don't care */
+		// Meanwhile the candidate can be assigned - take pure lits into account
+			
+		if( !isPure(clit) && ( m_assignment[ Lit(clit) ] || m_assignment[ Lit(clit)^1 ] ) )
+		  { continue; }
+
+		if( isPure(clit) && m_level[Lit(clit)>>1] == 0 )
+		  { continue; }
+			  
+#ifdef EXDEBUG
+		std::cout << "binempty? " << m_binWatches[Lit(clit)].empty() << " occur.empty(): " << q_occur[Lit(clit)].empty() << std::endl;
+		if( !m_binWatches[Lit(clit)].empty() )
+		  { std::cout << "bin lit: " << getLit( m_binWatches[Lit(clit)][0] ) << " [" << assignedTo( m_binWatches[Lit(clit)][0]) << "]" << std::endl; }
+		if( !q_occur[Lit(clit)].empty() )
+		  { std::cout << "wl0: " << getLit(q_occur[Lit(clit)][0]->wl0) << " [" << assignedTo( q_occur[Lit(clit)][0]->wl0 ) << "] " 
+					  << " wla: " << getLit(q_occur[Lit(clit)][0]->wla) << " [" << assignedTo( q_occur[Lit(clit)][0]->wla ) << "] " << std::endl;
+		  }
+
+#endif
+	   
+		//assert( ( m_binWatches[Lit(clit)].empty() || m_assignment[ Lit(m_binWatches[Lit(clit)][0]) ] ) && 
+		//		( q_occur[Lit(clit)].empty() || m_assignment[ q_occur[Lit(clit)][0]->wl0 ] || m_assignment[ Lit(q_occur[Lit(clit)][0]->wla) ] ) );
+
+		assert( ( (m_binWatchesLearnedIndex[Lit(clit)] == 0) || m_assignment[ Lit(m_binWatches[Lit(clit)][0]) ] ) && 
+				( q_occur[Lit(clit)].empty() || m_assignment[ q_occur[Lit(clit)][0]->wl0 ] || m_assignment[ Lit(q_occur[Lit(clit)][0]->wla) ] ) );
+
+		// Check binary:
+#ifdef EXDEBUG
+		std::cout << "check binary" << std::endl;
+#endif
+		//unsigned int cbsize = (unsigned int)m_binWatches[Lit(clit)].size();
+		unsigned int cbsize = m_binWatchesLearnedIndex[Lit(clit)];
+
+		unsigned int bc = 0;
+		for( ; bc < cbsize; ++bc )
+		  {
+			unsigned int walit = m_binWatches[Lit(clit)][bc];
+
+#ifdef EXDEBUG
+			std::cout << getLit(walit) << " [" << assignedTo(walit) << "] (" << q_reason[Lit(walit)>>1] << ")" << std::endl;
+#endif
+			// suitable bin-clause to watch?
+			if( !m_assignment[ Lit(walit) ] )
+			  {
+#ifdef EXDEBUG
+				std::cout << "new bin-watch found: " << getLit(walit) << std::endl;
+#endif
+				// Set literal as watch-bin-clause
+				std::swap( m_binWatches[ Lit(clit) ][0], m_binWatches[ Lit(clit)][bc] );
+				break;
+			  }
+			// A pure literal is covering "clit"? Then "clit" can't be "don't care"
+			else if( isPure(clit) && isPure(walit) )
+			  { 
+#ifdef EXDEBUG
+				std::cout << "A pure covers another pure: " << getLit(walit) << std::endl;
+#endif
+				std::swap( m_binWatches[ Lit(clit) ][0], m_binWatches[ Lit(clit)][bc] );
+				break; 
+			  }
+		  }
+		
+		// No binary clause found?
+		// Search in n-nary clauses
+		if( bc >= cbsize ) 
+		  {
+			unsigned int wsize = (unsigned int)q_occur[Lit(clit)].size();
+			//search for new watched clause
+
+#ifdef EXDEBUG
+			std::cout << "check n-nary" << std::endl;
+#endif
+
+			unsigned int k = 0;
+
+			// checking a pure literal, if it's don't care
+			if( isPure(clit) )
+			  {
+#ifdef EXDEBUG
+				std::cout << "check, whether " << getLit(clit) << " is don't care" << std::endl;
+#endif
+
+				if( !isUniversal(clit) )
+				  {
+					assert( m_assignment[Lit(clit)] );
+					for( ; k < wsize; ++k )
+					  {
+					
+#ifdef EXDEBUG
+						std::cout << getLit(q_occur[Lit(clit)][k]->wl0) << " " << assignedTo(q_occur[Lit(clit)][k]->wl0) << " "
+								  << getLit(q_occur[Lit(clit)][k]->wl1) << " " << assignedTo(q_occur[Lit(clit)][k]->wl1) << " "
+								  << getLit(q_occur[Lit(clit)][k]->wla) << " " << assignedTo(q_occur[Lit(clit)][k]->wla) << std::endl;
+						printClause( q_occur[Lit(clit)][k] );
+#endif
+
+						/* clause is no watch clause if 
+						   "wla" satisfies the clause or
+						   "wl0" and "wl1" satisfies the clause, 
+						   since there is at least one literal beside clit which satisfies the clause (clit potentially pure/don't care)
+						*/
+
+						// Watches are open, i.e., clause is not satisfied yet
+						// -> clause is new watch
+						if( !m_assignment[Lit(q_occur[clit][k]->wla)] &&
+							(!m_assignment[(q_occur[clit][k]->wl0)] || ((q_occur[clit][k]->wl0) == clit) ) &&
+							(!m_assignment[(q_occur[clit][k]->wl1)] || ((q_occur[clit][k]->wl1) == clit) ) )
+						  {
+							setNewPureWatch(clit, k); break;
+						  }
+
+						// Clause is satisfied... check if it's only satisfied by pure. 
+						// In this case the current clause is the new watch
+						unsigned int pos(0);
+						unsigned int lit = q_occur[clit][k]->clause()[pos];
+						while( lit != 0 )
+						  {
+							// Clause satisfied by non-pure literal 
+							// => clause can not be a watch
+							if( m_assignment[ Lit(lit) ] && !isPure(lit) )
+							  { break; }
+							lit = q_occur[clit][k]->clause()[++pos];
+						  }
+							
+						// All assignments that satisfies the clause are pure
+						if( q_occur[clit][k]->clause()[pos] == 0 )
+						  { setNewPureWatch(clit, k); break;}
+					  }
+				  }
+				else
+				  {
+					assert( m_assignment[Lit(clit)^1] );
+					for( ; k < wsize; ++k )
+					  {
+						
+						// Looking for a second literal that does not satisfy the clause
+						/* 
+						   clause is no watch clause if
+						   "wl0" or  "wla" satsifies the clause,
+						   since there is at least one literal beside clit which satisfies the clause (clit potentially pure/don't care)
+						*/
+
+						// Watches are open, i.e., clause is not satisfied yet
+						// -> clause is new watch
+						if( !m_assignment[Lit(q_occur[Lit(clit)][k]->wla)] &&
+							(!m_assignment[q_occur[Lit(clit)][k]->wl0] || ((q_occur[Lit(clit)][k]->wl0) == clit) ) &&
+							(!m_assignment[q_occur[Lit(clit)][k]->wl1] || ((q_occur[Lit(clit)][k]->wl1) == clit) ) )
+						  {
+							setNewPureWatch(clit, k); break;
+						  }
+
+						// Clause is satisfied... check if it's only satisfied by pure. 
+						// In this case the current clause is the new watch
+						unsigned int pos(0);
+						unsigned int lit = q_occur[Lit(clit)][k]->clause()[pos];
+						while( lit != 0 )
+						  {
+							// Clause satisfied by non-pure literal 
+							// => clause can not be a watch
+							if( m_assignment[ Lit(lit) ] && !isPure(lit) )
+							  { break; }
+							lit = q_occur[Lit(clit)][k]->clause()[++pos];
+						  }
+							
+						// All assignments that satisfies the clause are pure
+						if( q_occur[Lit(clit)][k]->clause()[pos] == 0 )
+						  { setNewPureWatch(clit, k); break;}
+					  }
+				  }
+			  }
+			else
+			  {
+				++k;
+				for( ; k < wsize; ++k )
+				  {
+					// is the clause still unassigned?
+					if( !m_assignment[ q_occur[Lit(clit)][k]->wl0 ] && !m_assignment[ Lit(q_occur[Lit(clit)][k]->wla) ] )
+					  {
+						setNewPureWatch(clit,k);
+						break;
+					  }
+				  }
+			  }
+			  
+			// no watched clause found? -> "watchlit" is pure
+			if( k >= wsize )
+			  {
+				if( isPure(clit) )
+					  
+				  {
+					++q_dontcare;
+							
+					if( isUniversal(clit) )
+					  {	clit ^= 1; }
+							
+					setDC(clit);
+					/* put pseudo-implication on ds-stack*/
+					addImplication(clit, NULL);
+#ifdef DEBUG
+					std::cout << getLit(clit) << "(" << (isUniversal(clit)?"a":"e") << ") is dc (" << q_reason[Lit(clit)>>1] << ")" << std::endl;
+#endif
+							
+				  }
+				else
+				  {
+					++q_purelits;
+
+					if( !isUniversal(clit) )
+					  {	clit ^= 1; }
+
+					setPure(clit);
+					addImplication( clit, NULL );
+#ifdef DEBUG
+					std::cout << getLit(clit) << "(" << (isUniversal(clit)?"a":"e") << ") is pure (" << q_reason[Lit(clit)>>1] << ")" << std::endl;
+#endif
+
+					/* do bcp - the bcp can only detect new units, if we add an universal pure literal */
+					if( isUniversal(clit) )
+					  { return true; }
+					else
+					  { break; }
+				  }
+			  }
+		  }
+	  }
+	return false;
+  }
+
+  void Core::setNewPureWatch( unsigned int lit, unsigned int pos )
+  {
+#ifdef EXDEBUG
+	std::cout << __func__ << " for " << getLit(lit) << " (pos: " << pos << ")" << std::endl;
+#endif
+	// set new watch clause
+	pointToClause* tmpptc = q_occur[ Lit(lit) ][pos];
+
+	q_occur[ Lit(lit) ][pos] = q_occur[ Lit(lit) ][0];
+	q_occur[ Lit(lit) ][0] = tmpptc;
+	q_occur[ Lit(lit) ][0]->litlist.push_back(lit);
+	
+	unsigned int j = 0;
+	unsigned int lsize = (unsigned int)q_occur[ Lit(lit) ][pos]->litlist.size();
+	for(; j < lsize; ++j )
+	  {
+
+		if( q_occur[ Lit(lit) ][pos]->litlist[j] == lit )
+		  {
+			// remove literal from old clause
+			q_occur[ Lit(lit) ][pos]->litlist[j] = q_occur[ Lit(lit)][pos]->litlist[--lsize];
+			q_occur[ Lit(lit) ][pos]->litlist.pop_back();
+
+			--j;
+			break;
+		  }
+	  }
+	assert( j != lsize );
+						
+#ifdef EXDEBUG
+	std::cout << "new watch clause found: " << std::endl;
+	printClause(q_occur[Lit(lit)][0]);
+#endif
+  }
+
+  // Setup the Litlists of the clauses.
+  // Ensure that the first entry in the occur-list of "lit" contains "lit" in the Litlist ( every literal should watched once )
+  bool Core::setupLitLists ( bool checkpure )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif 
+  
+	assert( m_decisionLevel == 0 );
+
+	// Check whether litlist is already initialized
+	for( unsigned int i = 2; i != q_occur.size(); ++i )
+	  {
+		// Search for first non-empty occurence list
+		if( !q_occur[i].empty() )
+		  {
+			// If the litlist of the first element contains a literal, the list is alreay initialized
+			if( q_occur[i][0]->litlist.empty() )
+			  { break; }
+			else
+			  { return false; }
+		  }
+	  }
+
+	std::vector< bool > isWL( ((m_variables << 1)+2), false ); 
+	unsigned int dbsize = (unsigned int)m_clauseDatabase.size();
+
+	// for all n-nary clauses
+	for( unsigned int i = 0; i < dbsize; ++i )
+	  {
+		// Every literal in the clause
+		pointToClause* ptc = m_clauseDatabase[i];
+
+		if( ptc->lbd() > 1 ) 
+		  { continue; }
+
+#ifdef DEBUG
+		printClause(ptc);
+#endif
+
+		unsigned int k( 0 );
+		unsigned int lit( ptc->clause()[0] );
+
+		while( lit != 0 )
+		  {
+#ifdef DEBUG
+			std::cout << getLit(lit) << " " << isWL[Lit(lit)] << std::endl;
+#endif
+
+			// Is the literal not a watched lit yet?
+			if( !isWL[ Lit(lit) ] )
+			  {
+				// Watch it and mark literal as watched in this clause
+				ptc->litlist.push_back( lit );
+				isWL[ Lit( lit ) ] = true;
+
+				// Ensure that the first entry of "q_occur[lit]" contains "lit" in litlist
+				if( q_occur[ Lit( lit ) ][0] != ptc )
+				  {
+					unsigned int ocsize = (unsigned int)q_occur[Lit( lit )].size();
+					for( unsigned int j = 1; j < ocsize; ++j )
+					  {
+						if( q_occur[Lit( lit ) ][j] == ptc )
+						  {
+							q_occur[Lit( lit ) ][j] = q_occur[Lit( lit ) ][0];
+							q_occur[Lit( lit ) ][0] = ptc;
+							break;
+						  }
+					  }
+				  }
+			  }
+			lit = ptc->clause()[++k];
+		  }
+	  }
+		
+	// now check trivial pure lits (lit does not occur anyway or is pure on dl 0 )
+
+	if( !checkpure )
+	  { return false; }
+
+	bool result = false;
+		
+	unsigned int size = (m_variables << 1) + 2;
+	for( unsigned int i = 2; i < size; ++i )
+	  {
+		if( q_level[i>>1] == 0 || q_deleted[i>>1] || m_assignment[i] || m_assignment[i^1] || m_donttouch[i>>1])
+		  { continue; }
+
+#ifdef DEBUG
+		std::cout << "check: " << getLit(i) << "/" << getLit(i^1) << std::endl;
+		std::cout << "binwatches[i]empty " << m_binWatches[i].empty() << " qoccur[i]empty " << q_occur[i].empty() << std::endl
+				  << "binwatches[i^1]empty " << m_binWatches[i^1].empty() << " qoccur[i^1]empty " << q_occur[i^1].empty() << std::endl;
+#endif
+
+		std::vector< unsigned int > binwatch = m_binWatches[i];
+		unsigned int bsize = m_binWatchesLearnedIndex[i];
+
+		unsigned int b(0);
+		for( ; b < bsize; ++b )
+		  {
+			if( !m_assignment[Lit(binwatch[b])] )
+			  { break; }
+		  }
+
+		if( b == bsize )
+		  {
+			unsigned int n(0);
+			unsigned int nsize = (unsigned int)q_occur[i].size();
+			for( ; n < nsize; ++n )
+			  {
+				pointToClause* ptc = q_occur[i][n];
+				if( !m_assignment[ptc->wl0] && !m_assignment[ptc->wl1] && !m_assignment[Lit(ptc->wla)] )
+				  { break; }
+			  }
+
+			if( n == nsize )
+			  {
+				unsigned int pure(i);
+				
+				// if literal is existential...
+				if( ( (q_level[i>>1]&1) != 0 ) )
+				  { pure ^= 1; }
+				setPure(pure);
+				addImplication( getUniFlag(pure), NULL);
+#ifdef DEBUG
+				std::cout << getLit(pure) << " is pure (" << (isUniversal(getUniFlag(pure))?"u)":"e)") << std::endl;
+#endif
+				result = true;
+
+				// now check if variable is don't care
+
+				// if we already check "-v" go to next var
+				if( (i&1) != 0 )
+				  { continue; }
+
+				std::vector< unsigned int > binwatch = m_binWatches[i^1];
+				//unsigned int bsize = (unsigned int)binwatch.size();
+				unsigned int bsize = m_binWatchesLearnedIndex[i^1];
+
+				unsigned int b(0);
+				for( ; b < bsize; ++b )
+				  {
+					if( !m_assignment[Lit(binwatch[b])] )
+					  { break; }
+				  }
+
+				if( b == bsize )
+				  {
+					unsigned int n(0);
+					unsigned int nsize = (unsigned int)q_occur[i^1].size();
+					for( ; n < nsize; ++n )
+					  {
+						pointToClause* ptc = q_occur[i^1][n];
+						if( !m_assignment[ptc->wl0] && !m_assignment[ptc->wl1] && !m_assignment[Lit(ptc->wla)] )
+						  { break; }
+					  }
+
+					if( n == nsize )
+					  {
+						unsigned int dc(i^1);
+				
+						// if literal is existential...
+						if( ( (q_level[i>>1]&1) == 0 ) )
+						  { dc ^= 1; }
+						setDC(dc);
+						addImplication( getUniFlag(dc), NULL);
+#ifdef DEBUG
+						std::cout << getLit(dc) << " is dc (" << (isUniversal(getUniFlag(dc))?"u)":"e)") << std::endl;
+#endif
+						result = true;
+					  }
+				  }
+			  }
+		  }
+	  }
+	return result;
+  }
+
+  /* this method detect literals which are don't care - useful for solution */
+  void Core::detectDC( void )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int pos(1);
+	unsigned int endindex( m_dsEndIndex );
+
+	while( pos < endindex )
+	  {
+		unsigned int lit = m_decisionStack[pos++];
+#ifdef DEBUG
+		std::cout << getLit(lit) << (isUniversal(lit)?"(a)":"(e)")<< " mlevel: " << m_level[Lit(lit)>>1] << " qr:" << q_reason[Lit(lit)>>1] << std::endl;
+#endif
+		if( !isPure(lit) || m_level[ Lit(lit)>>1] == 0 )
+		  { continue; }
+
+		unsigned int dclevel(0);
+
+		if(isUniversal(lit) )
+		  { lit ^= 1; }
+
+		/* first look at binwatches */
+#ifdef DEBUG
+		std::cout << "binwatches: " << std::endl;
+#endif
+
+		std::vector<unsigned int> binwatches = m_binWatches[Lit(lit)];
+		//unsigned int bsize((unsigned int)binwatches.size());
+		unsigned int bsize = m_binWatchesLearnedIndex[Lit(lit)];
+		unsigned int b(0);
+		for( ; b < bsize; ++b )
+		  {
+#ifdef DEBUG
+			std::cout << getLit(binwatches[b]) << " [" << assignedTo(binwatches[b]) << "] " << std::endl;
+#endif
+			if( !m_assignment[Lit(binwatches[b])] )
+			  { break; }
+			else if( m_level[Lit(binwatches[b])>>1] > dclevel )
+			  { dclevel = m_level[Lit(binwatches[b])>>1]; }
+		  }
+	
+#ifdef DEBUG
+		std::cout << "qoccur: " << std::endl;
+#endif	
+			
+		/* all binary clauses satisfied by other literals? Check nary-clauses */
+		if( b == bsize )
+		  {
+			unsigned int size((unsigned int)q_occur[Lit(lit)].size());
+			unsigned int n(0);
+			for( ; n < size; ++n )
+			  {
+				pointToClause* ptc = q_occur[Lit(lit)][n];
+
+#ifdef DEBUG
+				printClause(ptc);
+#endif
+
+				if( isUniversal(lit) )
+				  {
+					if( !m_assignment[ptc->wl0] )
+					  {
+#ifdef DEBUG
+						std::cout << "search for suitable universal lit" << std::endl;
+#endif
+						if (ptc->wla != lit && m_assignment[Lit(ptc->wla)] )
+						  {
+							if( m_level[Lit(ptc->wla)>>1] > dclevel )
+							  { dclevel = m_level[Lit(ptc->wla)>>1]; }
+							continue;
+						  }
+
+						unsigned int faq( ptc->faq() );
+						unsigned int clit(ptc->clause()[faq]);
+						while( clit != 0 )
+						  {
+#ifdef DEBUG
+							std::cout << getLit(clit) << " [" << assignedTo(clit) << "]" << std::endl;
+#endif
+							if( clit != lit && m_assignment[Lit(clit)] )
+							  { 
+								if( m_level[Lit(clit)>>1] > dclevel )
+								  { dclevel = m_level[Lit(clit)>>1]; }
+								break; 
+							  }
+							clit = ptc->clause()[++faq];
+						  }
+						
+						if( clit == 0 )
+						  { break; }
+					  }
+					else if( m_level[ptc->wl0>>1] > dclevel )
+					  { dclevel = m_level[ptc->wl0>>1]; }
+						   
+				  }
+				else if (!isUniversal(lit) )
+				  {
+					if( !m_assignment[Lit(ptc->wla)] )
+					  {
+#ifdef DEBUG
+						std::cout << "another existential lit?" << std::endl
+								  << "wl0: " << getLit(ptc->wl0) << " [" << assignedTo(ptc->wl0) << "] wl1: " << getLit(ptc->wl1) << " [" << assignedTo(ptc->wl1) << "]" << std::endl;
+#endif
+						/* this includes also the case when ptc->wl1 doesn't exist */
+						if( ptc->wl0 == lit )
+						  {
+							if( !m_assignment[ptc->wl1] )
+							  { break; }
+							else if( m_level[ptc->wl1>>1] > dclevel )
+							  { dclevel = m_level[ptc->wl1>>1]; }
+						  }
+						else if( m_level[ptc->wl0>>1] > dclevel )
+						  { dclevel = m_level[ptc->wl0>>1]; }
+							  							
+					  }
+					else if( m_level[Lit(ptc->wla)>>1] > dclevel )
+					  { dclevel = m_level[Lit(ptc->wla)>>1]; }
+				  }
+			  }
+				
+			/* also all nary-clauses are satisfied by other lits? -> literal is don't care */
+			if ( n == size )
+			  {
+#ifdef DEBUG
+				std::cout << getLit(lit) << " is don't care on level " << dclevel << std::endl;
+#endif
+				++q_dontcare;
+				assert( dclevel >= m_level[Lit(lit)>>1] );
+				setDC(lit);
+
+				if( isUniversal(lit) )
+				  { lit ^= 1; }
+
+				addImplication(lit, NULL );
+			  }
+		  }
+	  }
+  }
+}

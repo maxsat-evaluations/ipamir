@@ -1,0 +1,3008 @@
+
+/********************************************************************************************
+quantom.cpp -- Copyright (c) 2014, Tobias Schubert, Sven Reimer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, merge, 
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons 
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+********************************************************************************************/
+
+// Include quantom related headers.
+
+#include "core.hpp"
+#include "debug.cpp"
+#include "bcp.cpp"
+#include "conflict.cpp"
+#include "lifting.cpp"
+#include "subsumption.cpp"
+#include "preprocessor.cpp"
+#include "pure.cpp"
+#include "solution.cpp"
+#include "upla.cpp"
+#include "quantom.hpp"
+#include "control.hpp"
+
+#ifdef COMBSOLVER
+#include "export.cpp"
+#endif
+
+namespace quantom
+{
+
+  unsigned int greatestPowerOfTwoLessThan(unsigned int n)
+  {
+	unsigned int k=1;
+	while (k<n)
+	  { k <<= 1; }
+
+	return (k>>1);
+  }
+
+  // Definition
+  quantom::configureset Quantom::quantom_configs;
+
+  // Constructor.
+  Quantom::Quantom ( void ) :
+	m_control(NULL),
+    m_cores(),
+	m_blackmagic(1),
+	m_cpulimit(0.0),
+	m_starttime(0.0),
+	m_Constraints(),
+	m_pendingConstraints(),
+	m_softvariables(),
+	m_softclauses(),
+	m_triggerVars(),
+	m_low(-1),
+	m_high(-1),
+	m_preprocess(false),
+	m_maxinprocess(false),
+	m_skipinitbychance(false),
+	m_stacksize(0),
+	m_globalPropertyTrigger(),
+	m_softstack(),
+	m_dummyvar(0),
+	m_splittedWidth(8),
+	m_bypassGrid(4),
+	m_horizontalwidth(4),
+	m_setCSC(false),
+	m_setTrigger(false),
+	m_maxWidth(0),
+	m_skipped(0),
+	m_comparator(0),
+	m_verticalbypasses(0),
+	m_horizontalbypasses(0)
+  {
+
+    // Initialize "m_control".
+    m_control = new Control();
+	
+    // Initialize a new QBF solving core.
+	unsigned int corenumber = quantom_configs.initconfigs;
+	assert(corenumber > 0 );
+	m_cores.resize(corenumber);
+	for( unsigned int i = 0; i != corenumber; ++i )
+	  { m_cores[i] = new Core(m_control); }
+
+	m_softstack.push_back(0);
+	m_blackmagic = corenumber; 
+  }
+   
+  // Destructor.
+  Quantom::~Quantom (void) 
+  { 
+	for( unsigned int i = 0; i != m_cores.size(); ++i )
+	  { delete m_cores[i]; }
+
+	delete m_control;
+  }
+
+  // Returns the number of decisions made so far.
+  unsigned int Quantom::decisions (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->decisions(); }
+  
+  // Returns the number of BCP operations performed so far.
+  unsigned int Quantom::bcps (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->bcps(); }
+
+  // Returns the number of conflicts encountered so far.
+  unsigned int Quantom::conflicts (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->conflicts(); }
+
+  // Returns the number of solutions encountered so far.
+  unsigned int Quantom::solutions (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->solutions(); }
+  
+  // Returns the number of pure literals detected so far.
+  unsigned int Quantom::purelits (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->purelits(); }
+
+  // Returns the number of don't care literals detected so far.
+  unsigned int Quantom::dontcare (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->dontcare(); }
+
+  // Returns the number of restarts performed so far.
+  unsigned int Quantom::restarts (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->restarts(); }
+
+  // Returns the number of restart attempts performed so far.
+  unsigned int Quantom::restartAttempts (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->restartAttempts(); }
+
+  // The number of database simplifications performed so far.
+  unsigned int Quantom::clauseSimplifications (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->clauseSimplifications(); }
+  unsigned int Quantom::cubeSimplifications (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->cubeSimplifications(); }
+
+  unsigned int Quantom::clauses(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->clauses(); }
+  
+  unsigned int Quantom::learnedclauses(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->learnedclauses(); }
+	
+  unsigned int Quantom::remainingcubes(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->remainingcubes(); }
+
+  unsigned int Quantom::literals(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->literals(); }
+
+  unsigned int Quantom::lhbrclauses(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->lhbrclauses(); }
+
+  unsigned int Quantom::remainingliterals(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->remainingliterals(); }
+
+  unsigned int Quantom::resolvedVar (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->resolvedVar(); }
+
+  unsigned int Quantom::deletedLevels (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->deletedLevels(); }
+  
+  unsigned int Quantom::mergedLevels (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->mergedLevels(); }
+    
+  unsigned int Quantom::unitProp (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->unitProp(); }
+
+  unsigned int Quantom::inprocessings (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->inprocessings(); }
+
+  std::vector<unsigned int> Quantom::bcpstat(unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->bcpstat(); } 
+
+  unsigned int Quantom::getExtendedResult (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->getExtendedResult(); }
+
+  // Returns a pointer to the satisfying variable assignment (contains invalid data if the formula is unsatisfiable).
+  const std::vector<unsigned int>& Quantom::model (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->model(); }
+
+  void Quantom::trivialAssignment (unsigned int id) const { m_cores[id]->trivialAssignment(); }
+
+  const std::vector< std::vector<unsigned int> >& Quantom::getEquivalences (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->getEquivalences(); }
+
+  void Quantom::getLearnedClauses( std::vector< std::vector< unsigned int > >& learnedclauses, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->getLearnedClauses( learnedclauses ); }
+
+  // Sets the time limit to "t" seconds. There will be no limit at all if "t" is less or equal 0.
+  void Quantom::setCPULimit ( double t ) 
+  { 
+	m_control->setCPULimit(t);
+  }
+
+  void Quantom::setIncrementalMode( bool val ) 
+  { m_control->setIncrementalMode(val); }
+
+  void Quantom::skipInitbyChance( bool val )
+  { m_skipinitbychance = val; }
+
+  // Sets the Luby shift to "luby" (default: 12).
+  void Quantom::setLubyShift ( unsigned int luby, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_lubyShift = luby; m_cores[id]->setLubyShift(luby); }
+
+  // Sets the inner and outer loop values for picosat restart modes 
+  // default: inner=1024, outer=32
+  void Quantom::setPicoLoops( unsigned int inner, unsigned int outer, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_outerPico = outer; quantom_configs[id]->c_innerPico = inner; m_cores[id]->setPicoLoops(inner, outer); }
+
+  // Sets the "Initial Variable Activity" to "val" (default: 1.0).
+  void Quantom::setIVA ( unsigned int val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setIVA(val); }
+
+  // Sets the "Variable Activity Multiplier" to "mult" (default: 1.05).
+  void Quantom::setActMultiplier ( double mult, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setActMultiplier(mult); }
+
+  // Sets the "Initial Phase" mode to "val".
+  // 0: FALSE,
+  // 1: All flipped (Phase depends also of decision heuristic),
+  // 2: Universal flipped (default),
+  // 3: Random
+  void Quantom::setIP ( unsigned int val, unsigned int id)  { assert(id < m_cores.size()); quantom_configs[id]->c_ip = val; m_cores[id]->setIP(val); }
+
+  // Delete clauses/cubes with high lbd during "simplify"
+  void Quantom::setSimplifyLBD( unsigned int val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setSimplifyLBD(val); }
+
+  // Restricted Cube Learning
+  void Quantom::setSkipLearning ( bool val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setSkipLearning( val ); }
+    
+  // Switch cache value of variable assignment with restart
+  void Quantom::setSwitchVarSign ( bool val, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_svs = val; m_cores[id]->setSwitchVarSign(val); }
+
+  // Sets the Decision Heuristic to "val" (default:0)
+  // 0: VSIDS
+  // 1: DLIS
+  // 2: DLIS+Implication
+  // 3: Qube-Style
+  void Quantom::setDecHeu (unsigned int val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_decHeu = val; m_cores[id]->setDecHeu(val); }
+
+  // Sets "Restart Heuristic" to "val" (default:0).
+  // 0: no restarts
+  // 1: with luby-shift
+  // 2: picosat-style (inner and outer loops)
+  // 3: glucose-style (average decision level)
+  void Quantom::setRestartHeu(unsigned int val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_restartHeu = val; m_cores[id]->setRestartHeu(val); }
+
+  // Reset heuristics during solving
+  void Quantom::setResetHeu(bool val, unsigned int id) { assert(id < m_cores.size()); m_cores[id]->setResetHeu(val); }
+
+  void Quantom::setCacheSwap(bool val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_cacheSwap = val; m_cores[id]->setCacheSwap(val); }
+
+  // Use Lazy Hyper Binary Resolution?
+  void Quantom::setLHBR(bool val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_lhbr = val; m_cores[id]->setLHBR(val); }
+
+  // Minimize cubes?
+  void Quantom::setMinCube(bool val, unsigned int id) { assert(id < m_cores.size()); m_cores[id]->setMinCube(val); }
+
+  // Use Agility?
+  void Quantom::setAgility(bool val, unsigned int id) { assert(id < m_cores.size()); m_cores[id]->setAgility(val); }
+
+  // Set the heuristic for the order of the literals in a solution case
+  // 000: variable index
+  // 001: overall occurence (from lowest to highest)
+  // 010: pos/neg occurence (from lowest to highest)
+  // 011: cache last solution - prefer literals which are deleted last time
+  // 1xx: prefer quantlevel with least remaining literals
+  void Quantom::setSolutionOrder( unsigned int val, unsigned int id) { assert(id < m_cores.size()); m_cores[id]->setSolutionOrder( val ); }
+
+  void Quantom::setSolutionType( unsigned int val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setSolutionType( val ); }
+
+  void Quantom::setMaxIndex (unsigned int max, unsigned int id) { assert(id < m_cores.size()); m_cores[id]->setMaxIndex(max); }
+  
+  // Set initial polarity to variable.
+  // Polarities overwrite every other initial setting
+  // "polarity"=true : set inital polarity to "true"
+  void Quantom::setPolarity( unsigned int var, bool polarity, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setPolarity(var,polarity); }
+
+  void Quantom::setActivity( unsigned int var, double activity, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setActivity(var,activity); }
+
+  // Returns the activity for each variable
+  std::vector<double> Quantom::getActivity (unsigned int id) const { assert(id < m_cores.size()); return m_cores[id]->getActivity(); }
+
+  void Quantom::setClauseSort( bool val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setClauseSort(val); }
+
+  // Set initial weight to variable.
+  // double value >=0. The initial activity will be multiplied with this weight
+  void Quantom::setWeight ( unsigned int var, double weight, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setWeight(var,weight); }
+
+  // use Preprocessor?
+  void Quantom::setPreprocessor ( bool val, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_prepro = val; m_cores[id]->setPreprocessor(val); m_preprocess = val;}
+
+  // use Inprocessor?
+  void Quantom::setInprocessor ( bool val, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_inpro = val; m_cores[id]->setInprocessor(val); }
+
+  // use Inprocessor in Maximizer?
+  void Quantom::setMaxInpro (bool val) { m_maxinprocess = val; }
+
+  // Perform full subsumption checks during preprocessing??
+  void Quantom::setSubsumption (bool val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_subsumption = val; m_cores[id]->setSubsumption(val); }
+
+  // Perform UPLA?
+  void Quantom::setUPLA (bool val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_upla = val; m_cores[id]->setUPLA(val); }
+
+  // use variable elimination?
+  void Quantom::setVarElim ( bool val, unsigned int id ) { assert(id < m_cores.size()); quantom_configs[id]->c_upla = val; m_cores[id]->setVarElim(val); }
+
+  // perform quantifier merge?
+  void Quantom::setQuantMerge (bool val, unsigned int id) { assert(id < m_cores.size()); quantom_configs[id]->c_quantMerge = val; m_cores[id]->setQuantMerge(val); }
+
+  // solve instance?
+  // if not the partial model obtains so far is stored, accessed by "model()"
+  void Quantom::setSolve( bool val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setSolve(val); }
+
+  // set lifting mode:
+  // 0: no lifting (default)
+  // 1: lifting with conflict clause
+  // 2: lifting with solution analysis
+  void Quantom::setLiftingMode( unsigned int val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setLiftingMode( val ); }
+
+  void Quantom::setBacktracklevel( unsigned int val, unsigned int id ) { assert(id < m_cores.size()); m_cores[id]->setBacktracklevel( val ); }
+
+  // get the last conflict clause derived by solver
+  std::vector< unsigned int > Quantom::getLastConflict( unsigned int id ) { assert(id < m_cores.size()); return m_cores[id]->getLastConflict(); }
+
+  // Adds a clause to the clause database. Returns FALSE if the CNF formula is unsatisfiable,
+  // otherwise TRUE will be returned. Assumes that the solver is on decision level 0 and that 
+  // "clause" is not empty. Furthermore, all literals have to be encoded as follows, having 
+  // variable indices greater 0:
+  //  x3 <--> (3 << 1)     = 6
+  // -x3 <--> (3 << 1) + 1 = 7
+  // All clauses inserted into the clause database using "addClause()" are assumed to belong to 
+  // the original CNF formula. Note, that "clause" will be modified. 
+  bool Quantom::addClause (std::vector<unsigned int>& clause) 
+  { 
+	bool rst = m_cores[0]->addClause(clause); 
+	
+	for( unsigned int i = 1; i < m_cores.size(); ++i )
+	  { 
+#ifndef NDEBUG
+		bool tmprst = m_cores[i]->addClause(clause); 
+		assert( rst == tmprst );
+#else
+		m_cores[i]->addClause(clause); 
+#endif
+	  }
+	return rst;
+  }
+
+  bool Quantom::addUnit (unsigned int lit, unsigned int id) 
+  {
+	assert( id < m_cores.size() );
+	
+	return m_cores[id]->addUnit(lit);
+  }
+
+  // Copy instance from core "id1" to core "id2" 
+  // Possibly overwrites instance in core "id2"
+  void Quantom::copyInstance( unsigned int id1, unsigned int id2 )
+  {
+	assert( id1 < m_cores.size() );
+	assert( id2 < m_cores.size() );
+
+	// reset core
+	m_cores[id2]->reset(true);
+
+	std::vector< std::vector< unsigned int > > prefix;
+	std::vector< std::vector< unsigned int > > clauses;
+
+	// copy to temp data structure
+	m_cores[id1]->exportCore(prefix, clauses);
+	
+	// now write in "id2"
+
+	// setup varlevels
+	for( unsigned int i = 0; i != prefix.size(); ++i )
+	  {
+		for( unsigned int j = 0; j != prefix[i].size(); ++j )
+		  {
+			unsigned int var( prefix[i][j]<<1 );
+#ifndef NDEBUG
+			bool res = m_cores[id2]->setQVarLevel(var, i+1);
+			assert(res);
+#else
+			m_cores[id2]->setQVarLevel(var, i+1);
+#endif
+		  }
+	  }
+
+	// write clauses
+
+	for( unsigned int i = 0; i != clauses.size(); ++i )
+	  {
+#ifndef NDEBUG
+		bool res = m_cores[id2]->addClause(clauses[i]);
+		assert(res);
+#else
+		m_cores[id2]->addClause(clauses[i]);
+#endif
+	  }
+  }
+
+  // Should variable "var" be a "Don't Touch" variable?
+  void Quantom::setDontTouch( unsigned int var, bool dt )
+  { 
+	for( unsigned int i = 0; i < m_cores.size(); ++i )
+	  { m_cores[i]->setDontTouch(var, dt); }
+  }
+
+  // Return true if "var" is a "Don't Touch" variable
+  bool Quantom::isDontTouch( unsigned int var )
+  { return m_cores[0]->isDontTouch(var); }
+
+  unsigned int Quantom::getQuantLevel( unsigned int var ) const 
+  { return m_cores[0]->getQuantLevel(var); }
+
+  // Load Configuration setting for "id"
+  void Quantom::loadConfiguration( unsigned int id )
+  {
+	assert( ( id < quantom_configs.configurations.size() ) &&
+			( id < m_cores.size() ) );
+	configure* config = quantom_configs.configurations[id];
+	
+	setDecHeu(config->c_decHeu, id );
+	setRestartHeu(config->c_restartHeu, id );
+	setLubyShift(config->c_lubyShift, id );
+	setPicoLoops(config->c_innerPico, config->c_outerPico, id );
+	setIP(config->c_ip, id);
+	setSwitchVarSign(config->c_svs, id);
+	setCacheSwap(config->c_cacheSwap, id);
+	setLHBR(config->c_lhbr, id);
+	setPreprocessor(config->c_prepro, id);
+	setInprocessor(config->c_inpro, id);
+	setSubsumption(config->c_subsumption, id);
+	setUPLA(config->c_upla, id);
+	setVarElim(config->c_varElim, id);
+	setQuantMerge(config->c_quantMerge, id);
+  }
+
+
+  // Simplifies the current CNF formula by performing some preprocessing steps.
+  // Returns FALSE if the formula is unsatisfiable, otherwise TRUE will be returned.
+  unsigned int Quantom::preprocess ( unsigned int id ) { assert(id < m_cores.size()); return m_cores[id]->preprocess(); }
+  unsigned int Quantom::inprocess ( unsigned int id ) { assert(id < m_cores.size()); return m_cores[id]->inprocess(); }
+
+  // Solves the current CNF formula taking the specified assumptions into account.
+  // The assumptions have to be encoded in the same way as the literals of a clause (see "addClause()").
+  // The return values are as follows:
+  //  0 -- time limit exceeded.
+  // 10 -- satisfiable.
+  // 20 -- unsatisfiable.
+  unsigned int Quantom::solve (std::vector<unsigned int>& assumptions, unsigned int id) 
+  { 
+
+    // (Re-)initialize the "Control" object.
+    m_control->resetDone();
+
+	assert(id < m_cores.size()); 
+	if( m_blackmagic > 1 )
+	  { return solveBlackMagic(assumptions); }
+
+	return m_cores[id]->solve(assumptions); 
+  }
+
+  // Solves the current CNF formula. The return values are as follows:
+  //  0 -- time limit exceeded.
+  // 10 -- satisfiable.
+  // 20 -- unsatisfiable.
+  unsigned int Quantom::solve (unsigned int id) 
+  { 
+	assert(id < m_cores.size()); 
+	// Initialization.
+	std::vector<unsigned int> noAssumptions;
+
+	return solve(noAssumptions,id); 
+  }
+
+  // lifts a solution, given by "assumptions"
+  // returns the lifted solution
+  // liftingmodes:
+  // 1 : conflict driven
+  // 2 : assumptions driven
+  // 3 : combine 1+2
+  std::vector< unsigned int > Quantom::solveLifting( std::vector<unsigned int>& assumptions, unsigned int liftingmode, unsigned int sort, unsigned int id )
+  { 
+	assert(id < m_cores.size()); 
+	return m_cores[id]->solveLifting(assumptions, liftingmode, sort); 
+  }
+
+  bool Quantom::setQVarLevel (unsigned int lit, unsigned int qlevel) 
+  { 
+	bool rst = m_cores[0]->setQVarLevel(lit, qlevel);
+	for( unsigned int i = 1; i < m_cores.size(); ++i )
+	  { m_cores[i]->setQVarLevel(lit, qlevel); }
+	return rst;
+  }
+  
+  // void Quantom::setupLevelActivities (unsigned int qlevel) {return m_core->setupLevelActivities(qlevel);}
+
+  unsigned int Quantom::deduceAssumptions (const std::vector<unsigned int>& assumptions, unsigned int id)
+  { 
+	assert(id < m_cores.size()); 
+	return m_cores[id]->deduceAssumptions(assumptions); 
+  }
+
+  unsigned int Quantom::getMaxQLevel ( void ) const 
+  { 
+	unsigned int maxqlevel = m_cores[0]->getMaxQLevel();
+	for( unsigned int i = 1; i != m_cores.size(); ++i )
+	  {
+		if( m_cores[i]->getMaxQLevel() > maxqlevel )
+		  { maxqlevel = m_cores[i]->getMaxQLevel(); }
+	  }
+	return maxqlevel;
+  }
+
+  void Quantom::setMaxMode( unsigned int val, unsigned int id )
+  {
+	assert( val < 3 );
+	assert( id < quantom_configs.size() );
+	quantom_configs[id]->c_maxMode = val;
+  }
+
+  // Initialize a new variable on q_level "level" (default: 1)
+  // Returns the corresponding positive Literal
+  // Method assumes, that the original max var number is already set in "m_variables"
+  unsigned int Quantom::newVariable ( unsigned int level )
+  {
+	unsigned int maxindex = m_cores[0]->variables()+1;
+	for( unsigned int i = 1; i != m_cores.size(); ++i )
+	  {
+		if( (m_cores[i]->variables()+1) > maxindex )
+		  { maxindex = m_cores[i]->variables()+1; }
+	  }
+
+#ifndef NDEBUG
+	bool result = setQVarLevel( maxindex, level );
+	assert( result );
+#else
+	setQVarLevel( maxindex, level );
+#endif
+	
+	return maxindex;
+  }
+
+  void Quantom::setNewQLevel ( unsigned int var, unsigned int level ) 
+  { 
+	for( unsigned int i = 0; i < m_cores.size(); ++i )
+	  { m_cores[i]->setNewQLevel(var, level); }
+  }
+
+
+  /* MaxQBF */
+
+  void Quantom::setGridMode( unsigned int val )
+  { assert(val < 4 ); m_bypassGrid = val; }
+
+  void Quantom::setHorizontalWidth( unsigned int val )
+  { assert( val > 0 ); m_horizontalwidth = val; }
+
+  // Create multiple maximizer for all soft clauses of size "k"
+  void Quantom::createPartialBitonicMaximizer( unsigned int part )
+  {
+	// clear model
+	trivialAssignment();
+
+	unsigned int softsize(m_softclauses.size());
+	Quantom::ConstraintPart cpart(m_splittedWidth);
+
+	unsigned int s ( part*m_splittedWidth );
+	unsigned int maxsize = s+m_splittedWidth;
+
+	if( softsize < maxsize )
+	  { 
+		maxsize = softsize;
+	  }
+
+	for( ; s < maxsize; ++s )
+	  { 
+		cpart.currenttrigger.push_back(m_softclauses[s].s_triggerlit>>1);
+		cpart.softclauses.push_back(&m_softclauses[s]);
+	  }
+
+	findSorterCSC(cpart);
+
+	createBitonicMaximizer(cpart);
+
+	setSorterCSC(cpart);
+  }
+
+  void Quantom::createNextPartialBitonicMaximizer( void )
+  {
+  	assert( !m_Constraints.empty() );
+
+  	Quantom::ConstraintPart part = m_Constraints.back();
+  	m_Constraints.pop_back();
+
+  	findSorterCSC(part);
+
+  	createBitonicMaximizer(part);
+
+  	setSorterCSC(part);
+  }
+
+  void Quantom::createBitonicMaximizer ( Quantom::ConstraintPart& part )
+  {
+  	// clear model
+  	trivialAssignment();
+
+	unsigned int size = part.size();
+
+	if( size == 0 )
+	  { return; }
+
+	bitonicSort( part, 0, size, false);
+
+	// Ensure that all interface variables are declared on first decision level
+	// And they should be don't touch
+	for( unsigned int i = 0; i != part.size(); ++i )
+	  {
+		setNewQLevel(part.currenttrigger[i],1);
+		setDontTouch(part.currenttrigger[i]);
+	  }
+
+	setVerticalBypasses(part);
+
+	m_pendingConstraints.push_front(part);
+  }
+
+  void Quantom::bitonicSort ( Quantom::ConstraintPart& part, unsigned int lo, unsigned int n, bool dir )
+  {
+	if (n>1)
+	  {
+		unsigned int m (n >> 1);
+
+		bitonicSort(part, lo, m, !dir);
+		bitonicSort(part, lo+m, n-m, dir);
+		bitonicMerge(part, lo, n, dir);
+	  }
+  }
+
+  void Quantom::bitonicMerge ( Quantom::ConstraintPart& part, unsigned int lo, unsigned int n, bool dir )
+  {
+	if( n>1 )
+	  {
+		unsigned int m( quantom::greatestPowerOfTwoLessThan(n) );
+
+		for (unsigned int i=lo;  i < (lo+n-m); i++)
+		  { bitonicCompare(part, i, i+m, dir); }
+
+		bitonicMerge(part, lo, m, dir);
+		bitonicMerge(part, lo + m, n-m, dir);
+	  }
+  }
+
+  void Quantom::bitonicCompare ( Quantom::ConstraintPart& part, unsigned int i, unsigned int j, bool dir )
+  {
+	std::vector< unsigned int >& input( part.currenttrigger );
+
+	// Don't do anything if current trigger is trivally true/false
+	// If the "left" trigger is true or the "right" trigger is false -> swap (shift true to "left")
+
+	if( model()[input[i]] != 0 || model()[input[j]] != 0 )
+	 { 
+		++m_skipped;
+
+		if( dir && ( model()[input[j]] == (input[j]<<1) ||
+					 model()[input[i]] == ( (input[i]<<1)^1 ) ) )
+		  { 
+			std::swap( input[i], input[j] ); 
+		  }
+		else if ( !dir && ( model()[input[i]] == (input[i]<<1) ||
+							model()[input[j]] == ( (input[j]<<1)^1 ) ) )
+		  { 
+			std::swap( input[i], input[j] ); 
+		  }
+
+		// If the "left" trigger is false or the "right" trigger is true -> do nothing (shift false to "right")
+		return;
+	  }
+
+	++m_comparator;
+
+	unsigned int v1( newVariable(getMaxQLevel()) );
+	unsigned int v2( newVariable(getMaxQLevel()) );
+
+	// v1 = input[i] OR input[j]
+	std::vector< unsigned int > newclause;
+
+#ifndef NDEBUG
+    bool result(false); 
+#endif
+
+	newclause.push_back( v1 << 1 );
+	newclause.push_back( (input[i]<<1)^1 );
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause( newclause );
+#endif
+
+	newclause.clear();
+
+	newclause.push_back( v1<<1 );
+	newclause.push_back( (input[j]<<1)^1);
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause( newclause );
+#endif
+
+	newclause.clear();
+
+	newclause.push_back((v1<<1)^1);
+	newclause.push_back(input[i]<<1);
+	newclause.push_back(input[j]<<1);
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause(newclause);
+#endif
+
+	newclause.clear();
+
+	// v2 = input[i] AND input[j]
+	newclause.push_back((v2<<1)^1);
+	newclause.push_back(input[i]<<1);
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause(newclause);
+#endif
+
+	newclause.clear();
+
+	newclause.push_back( (v2<<1)^1 );
+	newclause.push_back( input[j]<<1 );
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause( newclause );
+#endif
+
+	newclause.clear();
+
+	newclause.push_back(v2<<1);
+	newclause.push_back((input[i]<<1)^1);
+	newclause.push_back((input[j]<<1)^1);
+
+#ifndef NDEBUG
+    result = addClause(newclause); assert(result); 
+#else
+	addClause(newclause);
+#endif
+
+	// Now do the sort ;-)
+	if (dir)
+	  { input[i] = v1; input[j] = v2; }
+	else
+	  { input[i] = v2; input[j] = v1; }
+  }
+
+  unsigned int Quantom::calcFirstDepth( unsigned int& result, unsigned int& optimum, int& overalloptimum, std::vector< unsigned int>& externalAssumptions, unsigned int maxmode )
+  {
+	std::cout << __func__ << std::endl;
+	unsigned int size(m_softclauses.size()); 
+	unsigned int currentresult(QUANTOM_UNKNOWN);
+
+	struct rusage resources;
+
+	while( !m_Constraints.empty() )
+	  {
+		// Create sorter for part "part" 
+		createNextPartialBitonicMaximizer();
+
+		if( m_control->getVerbosity() > 1 )
+		  {
+			std::cout << "c comparator: " << m_comparator << " skipped: " << m_skipped << std::endl;
+			std::cout << "c horizontal bypasses: " << m_horizontalbypasses << " vertical bypasses: " << m_verticalbypasses << std::endl;
+		  }
+
+		int partialoptimum = (int)size;
+
+		std::vector< unsigned int > localAssumptions = externalAssumptions;
+
+		Quantom::ConstraintPart& part = m_pendingConstraints.front();
+
+		setSoftTrigger( localAssumptions, part );
+
+		if( m_control->getVerbosity() > 1 )
+		  {
+			unsigned int sum(0);
+			std::cout << "c ";
+			for( unsigned int i = 0; i != m_pendingConstraints.size(); ++i )
+			  {
+				std::cout << m_pendingConstraints[i].softclauses.size() << " (" << m_pendingConstraints[i].depth << "), ";
+				sum += m_pendingConstraints[i].softclauses.size();
+			  }
+			std::cout << " (" << sum << "," << m_softclauses.size() << ")" << std::endl;
+		  }
+
+		// All soft clauses already in one part?
+		if( part.softclauses.size() >= m_softclauses.size() )
+		  { maxmode = 5; }
+
+		// Maximize partial sorter
+		// Assumes that current partial result is in front of list
+
+		if( m_maxinprocess )
+		  { currentresult = inprocess(); }
+		else
+		  { currentresult = QUANTOM_UNKNOWN; }
+		
+		currentresult = maxSolve( partialoptimum, localAssumptions, maxmode );
+		m_control->setSumTime(true);
+
+		part.optimum = partialoptimum;
+		++part.depth;
+
+		if( currentresult == QUANTOM_SAT )
+		  {
+			result = QUANTOM_SAT;
+
+			optimum = partialoptimum - updateTriggerOptimum();
+
+			if( (int)size != partialoptimum )
+			  {
+				unsigned int lit = (part.currenttrigger[size-partialoptimum-1]<<1)^1;
+
+				externalAssumptions.push_back( lit );
+				
+				if( (int)optimum < overalloptimum )
+				  {
+					overalloptimum = optimum; 
+					
+					if ( m_control->getVerbosity() > 0 )
+					  { 
+						std::cout << "o " << optimum << std::endl; 
+						
+						if ( m_control->getVerbosity() > 1 )
+						  {
+							getrusage(RUSAGE_SELF, &resources); 
+							double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+							std::cout << "c " << (timeC-m_control->getStartTime()) << "s" << std::endl;
+						  }
+					  }
+				  }
+			  }
+
+			// "unit" bounds for the first element
+			if( ( m_pendingConstraints.size() == 1 ) && ( ( size-partialoptimum ) < part.size() ) && ( maxmode != 5 ) )
+			  {
+				unsigned int lit = (part.currenttrigger[size-partialoptimum]<<1);
+#ifndef NDEBUG
+				bool rst = addUnit(lit); assert(rst);
+#else
+				addUnit(lit);
+#endif
+			  }
+		  }
+		else if( currentresult == QUANTOM_UNSAT )
+		  {
+			m_control->setSumTime(false);
+			return QUANTOM_UNSAT;
+		  }
+		// Timeout
+		else if( currentresult == QUANTOM_UNKNOWN )
+		  {
+			assert( m_control->getCPULimit() > 0.0 );
+			m_control->setSumTime(false);
+			return QUANTOM_UNKNOWN;				
+		  }
+	  }
+
+	return QUANTOM_SAT;
+  }
+
+  // Merge to trigger parts. The merged trigger will be "trigger2" after merging
+  void Quantom::mergePartTrigger( Quantom::ConstraintPart& part1, Quantom::ConstraintPart& part2, unsigned int size )
+  {
+
+	assert( m_dummyvar != 0 );
+
+	// Fill the two parts in order to get two balanced part
+	while( part1.size() < part2.size() )
+	  {
+		// Add fake unit such that dummy var is always satisfied
+		part1.currenttrigger.push_back( m_dummyvar );
+	  }
+	while( part2.size() < part1.size() )
+	  {
+		// Add fake unit such that dummy var is always satisfied
+		part2.currenttrigger.push_back( m_dummyvar );
+	  }
+				
+	assert( part1.size() == part2.size() );
+
+	std::vector< unsigned int > inputA = part1.currenttrigger;
+	std::vector< unsigned int > inputB = part2.currenttrigger;
+	
+	// Merge current triggers
+	part2.currenttrigger.insert( part2.currenttrigger.end(), part1.currenttrigger.begin(), part1.currenttrigger.end());
+				
+	// Reverse "left half": bitonic sorter needs one half in decreasing and the other in increasing order
+	unsigned int middle = part2.size()>>1;
+	unsigned int start = 0;
+	while ((start != middle) && (start != --middle)) 
+	  { std::swap(part2.currenttrigger[start++], part2.currenttrigger[middle]); }
+				
+	// Merge original trigger indices
+	part2.softclauses.insert( part2.softclauses.end(), part1.softclauses.begin(), part1.softclauses.end() );
+
+	findSorterCSC( part2 );
+
+	part2.optimum = part2.optimum + part1.optimum - size;
+	
+	unsigned int partopt = part2.optimum;
+	for( unsigned int i = 0; i != m_Constraints.size(); ++i )
+	  {
+		partopt = partopt - m_softclauses.size() + m_Constraints[i].optimum;
+	  }
+	int maxsim = part2.softclauses.size() - partopt;
+
+	// Can we ensure a minimum of satisfied soft clauses?
+	if( ( maxsim > 0 ) && ( (int)part2.maxsimultan < maxsim ) )
+	  { part2.maxsimultan = maxsim; }
+	
+	// "Re-don't touch" current trigger vars
+	if( part2.depth > 0 )
+	  {
+		for( unsigned int i = 0; i != part2.size(); ++i )
+		  {
+			setDontTouch(part2.currenttrigger[i], false);
+		  }
+	  }
+
+	//clear model
+	trivialAssignment();
+
+	// Merge two partial sets
+	bitonicMerge( part2, 0, part2.size(), false );
+	// Store partial optimum
+
+	// Ensure that all interface variables are declared on first decision level
+	for( unsigned int i = 0; i != part2.size(); ++i )
+	  {
+		setNewQLevel(part2.currenttrigger[i],1);
+	  }
+
+	setSorterCSC( part2 );
+
+	setHorizontalBypasses( inputA, inputB, part2);
+
+	// increase depth
+	++part2.depth;
+
+	setVerticalBypasses( part2 );
+
+	if ( m_control->getVerbosity() > 1)
+	  {
+		std::cout << "c comparator: " << m_comparator << " skipped: " << m_skipped << std::endl;
+		std::cout << "c horizontal bypasses: " << m_horizontalbypasses << " vertical bypasses: " << m_verticalbypasses << std::endl;
+	  }
+  }
+
+  unsigned int Quantom::updateTriggerOptimum( void )
+  {
+	unsigned int result(0);
+	// proceed current considered trigger parts
+	// Skip result of current first element
+	for( unsigned int i = 1; i < m_pendingConstraints.size(); ++i )
+	  {
+		bool unproceeded = false;
+		// is "m_currentTriggerParts[i]" already solved at current depth?
+		if( m_pendingConstraints[i].depth < m_pendingConstraints[0].depth )
+		  { unproceeded = true; }
+		unsigned int pos = countSatisfiedSoftClauses( model(), m_pendingConstraints[i], unproceeded );
+		m_pendingConstraints[i].optimum = m_softclauses.size() - pos;
+		result += pos;
+	  }
+
+	// proceed non builded trigger parts
+	for( unsigned int i = 0; i < m_Constraints.size(); ++i )
+	  {
+		unsigned int pos = countSatisfiedSoftClauses( model(), m_Constraints[i], true );
+		m_Constraints[i].optimum = m_softclauses.size() - pos;
+		result += pos;
+	  }
+	return result;
+  }
+
+  void Quantom::setVerticalBypasses( Quantom::ConstraintPart& part )
+  {
+	std::vector< unsigned int > newclause;
+	std::vector< unsigned int > input( part.currenttrigger );
+	//setDontTouch( input[0] );
+
+	newclause.reserve(2);
+
+	for (unsigned int i = 1 ; i < input.size(); ++i)
+	  {
+		if( m_bypassGrid == 2 || m_bypassGrid == 3 )
+		  {
+			newclause.clear();
+			// temp[i] == 1 -> tmp[i-1]==1
+			// temp[i-1] == 0 -> tmp[i]==0
+			newclause.push_back( (input[i-1]<<1)^1 );
+			newclause.push_back( input[i]<<1 );
+
+			++m_verticalbypasses;
+
+#ifndef NDEBUG
+			bool rst = addClause(newclause); assert(rst);
+#else 
+			addClause(newclause);
+#endif
+		  }
+		//setDontTouch(input[i]);
+	  }
+  }
+
+  void Quantom::setHorizontalBypasses( const std::vector< unsigned int >& inputA, const std::vector< unsigned int >& inputB, const ConstraintPart& part )
+  {
+	if( m_bypassGrid != 1 && m_bypassGrid != 3 )
+	  { return; }
+
+	std::vector< unsigned int > newclause;
+	newclause.reserve(2);
+
+	unsigned int sizeA = inputA.size();
+#ifndef NDEBUG
+	unsigned int sizeB = inputB.size();
+	assert( sizeA == sizeB );
+	bool rst(false);
+#endif
+
+	unsigned int counter(0);
+	for( unsigned int i = 0; i != sizeA; ++i )
+	  {
+		++counter;
+		if( counter < m_horizontalwidth )
+		  { continue; }
+
+		counter = 1;
+
+		// A[i] == 0 => trigger[i] == 0
+		// B[i] == 0 => trigger[i] == 0
+
+		// skip trivial parts
+		if( model()[part.currenttrigger[i]] != ( (part.currenttrigger[i]<<1)^1 ) )
+		  {
+			if( model()[inputA[i]] == 0 )
+			  { 
+				newclause.clear();
+				newclause.push_back(inputA[i]<<1);
+				newclause.push_back((part.currenttrigger[i]<<1)^1);
+#ifndef NDEBUG
+				rst = addClause(newclause); assert(rst);			
+#else
+				addClause(newclause);
+#endif
+				++m_horizontalbypasses;
+			
+			  }
+			if( model()[inputB[i]] == 0 )
+			  { 
+				newclause.clear();
+				newclause.push_back(inputB[i]<<1);
+				newclause.push_back((part.currenttrigger[i]<<1)^1);
+#ifndef NDEBUG
+				rst = addClause(newclause); assert(rst);			
+#else
+				addClause(newclause);
+#endif
+				++m_horizontalbypasses;
+			  }
+		  }
+
+		// A[i] == 1 => trigger[i+sizeA] == 1
+		// B[i] == 1 => trigger[i+sizeA] == 1
+
+		assert( (i+sizeA) < part.size() );
+		// skip trivial parts
+		if( model()[part.currenttrigger[i]] != (part.currenttrigger[i]<<1) )
+		  {
+			if( model()[inputA[i]] == 0 )
+			  { 
+				newclause.clear();
+				newclause.push_back((inputA[i]<<1)^1);
+				newclause.push_back(part.currenttrigger[i+sizeA]<<1);
+#ifndef NDEBUG
+				rst = addClause(newclause); assert(rst);			
+#else
+				addClause(newclause);
+#endif
+				++m_horizontalbypasses;
+			  }
+			if( model()[inputB[i]] == 0 )
+			  { 
+				newclause.clear();
+				newclause.push_back((inputB[i]<<1)^1);
+				newclause.push_back(part.currenttrigger[i+sizeA]<<1);
+#ifndef NDEBUG
+				rst = addClause(newclause); assert(rst);			
+#else
+				addClause(newclause);
+#endif
+				++m_horizontalbypasses;
+			  }
+		  }
+	  }
+  }
+
+	
+  
+  // Add a clause to database, that should be maximized
+  // The first variable in the softclause should be the trigger variable for the clause
+  bool Quantom::addSoftClause ( std::vector< unsigned int >& clause, unsigned int weight )
+  {
+	std::vector<unsigned int > sclause(clause.size());
+
+	// Skip first variable, which defines the trigger variable
+	for( unsigned int i = 0; i < clause.size(); ++i )
+	  { sclause[i] = clause[i]; setDontTouch(sclause[i]>>1); }
+
+	if( m_control->getIncrementalMode() )
+	  {
+		// In incremental mode every softclause is triggered by a global assumption
+		if ( m_globalPropertyTrigger[m_stacksize] == 0 )
+		  { 
+			if( m_dummyvar == 0 )
+			  {
+				m_dummyvar = newVariable();
+				addUnit(m_dummyvar<<1);
+			  }
+
+			unsigned int thetrigger = newVariable();
+			m_globalPropertyTrigger[m_stacksize] = thetrigger;
+			setDontTouch(thetrigger);
+		  }
+		clause.push_back(m_globalPropertyTrigger[m_stacksize]<<1);
+	  }
+
+	unsigned int trigger( newVariable() );
+	setDontTouch(trigger);
+	unsigned int triggerlit(trigger<<1);
+	clause.push_back(triggerlit);
+
+	// Add relaxvariable "weight" times to the network
+	for( unsigned int i = 0; i < weight; ++i )
+	  { 
+		m_softclauses.push_back( Softclause(triggerlit, sclause ) );
+	  }
+
+	if( m_softstack[m_stacksize] == 0 )
+	  { m_softstack[m_stacksize] = m_softclauses.size(); }
+
+	return addClause(clause);
+  }
+
+  // Set a soft variable "var" over different levels "levels"
+  multiplexervars Quantom::setSoftVariable ( unsigned int var, const std::vector< unsigned int >& levels, const std::vector< unsigned int >& weight )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << " " << var << " (" << getQuantLevel(var) << ")" << std::endl;
+#endif
+	assert( levels.size() == weight.size() );
+
+	if ( getExtendedResult() == QUANTOM_UNSAT )
+	  { 
+		return multiplexervars();
+	  }
+
+	unsigned int softlevel = getMaxQLevel();
+	for(unsigned int i = 0; i != levels.size(); ++i )
+	  {
+		if( levels[i] > softlevel )
+		  { softlevel = levels[i]; }
+	  }
+
+	if( (softlevel&1) == 0 )
+	  { ++softlevel; }
+
+	setQVarLevel(var, softlevel);
+
+	unsigned int outvar( var );
+	setDontTouch(outvar);
+#ifndef NDEBUG
+	bool rst( true );
+#endif
+
+	std::vector< unsigned int > muxinputs;
+	std::vector< unsigned int > selectinputs;
+
+	for( unsigned int i = 0; i != levels.size(); ++i )
+	  {
+		unsigned int relaxvar = newVariable(1);
+		unsigned int levelvar = newVariable(levels[i]);
+		setDontTouch(relaxvar);
+		setDontTouch(levelvar);
+
+		selectinputs.push_back(relaxvar);
+		muxinputs.push_back(levelvar);
+		
+		// Add "multiplexer"
+		std::vector< unsigned int > muxclause;
+		muxclause.reserve(3);
+
+		muxclause.clear();
+		muxclause.push_back((relaxvar<<1)^1);	
+		muxclause.push_back((outvar<<1)^1);
+		muxclause.push_back(levelvar<<1);
+
+#ifndef NDEBUG
+		rst = addClause(muxclause); assert( rst );
+#else
+		addClause(muxclause);
+#endif
+
+		muxclause.clear();
+		muxclause.push_back((relaxvar<<1)^1);	
+		muxclause.push_back(outvar<<1);
+		muxclause.push_back((levelvar<<1)^1);
+
+#ifndef NDEBUG
+		rst = addClause(muxclause); assert( rst );
+#else
+		addClause(muxclause);
+#endif
+
+		std::vector< unsigned int > relaxclause;
+
+		relaxclause.push_back(relaxvar<<1);
+
+		addSoftClause(relaxclause, weight[i]);
+
+		std::cout << "c allowed level for softvariable " << var << " is set to " << levels[i] << " with weight " << weight[i] << std::endl;
+	  }
+
+	multiplexervars result(muxinputs, selectinputs, levels, weight, var);
+	m_softvariables.push_back(result);
+
+	// One hot encoding
+	if( selectinputs.size() < 6 )
+	  {
+		std::vector< unsigned int > aone;
+		aone.reserve(selectinputs.size());
+
+		for( unsigned int i = 0; i != selectinputs.size(); ++i )
+		  {
+			unsigned int leveli = selectinputs[i];
+			aone.push_back(leveli<<1);
+			for( unsigned int j = i+1; j < selectinputs.size(); ++j )
+			  {
+				unsigned int levelj = selectinputs[j];
+
+				std::vector< unsigned int > onehotclause;
+				onehotclause.reserve(2);
+
+				onehotclause.push_back((leveli<<1)^1);
+				onehotclause.push_back((levelj<<1)^1);
+#ifndef NDEBUG
+				rst = addClause(onehotclause); assert( rst );
+#else
+				addClause(onehotclause);
+#endif
+			  }
+		  }
+#ifndef NDEBUG
+		rst = addClause(aone); assert( rst );
+#else 
+		addClause(aone);
+#endif
+	  }
+	// C. Sinz "Towards an optimal CNF encoding of Boolean cardinality constraints"
+	else
+	  {
+		unsigned int size = selectinputs.size()-1;
+
+		std::vector< unsigned int > aone;
+		aone.reserve(size+1);
+		std::vector< unsigned int > amoclause;
+		amoclause.reserve(2);		
+
+		unsigned int helpervar = newVariable(1);
+
+		amoclause.push_back((selectinputs[0]<<1)^1);
+		amoclause.push_back(helpervar<<1);
+#ifndef NDEBUG
+		rst = addClause(amoclause); assert( rst );
+#else 
+		addClause(amoclause);
+#endif
+
+		aone.push_back(selectinputs[0]<<1);
+
+		for( unsigned int i = 1; i < size; ++i )
+		  {
+			unsigned int nexthelpervar = newVariable(1);
+
+			amoclause.clear();
+			amoclause.push_back((selectinputs[i]<<1)^1);
+			amoclause.push_back(nexthelpervar<<1);
+#ifndef NDEBUG
+			rst = addClause(amoclause); assert( rst );
+#else
+			addClause(amoclause);
+#endif
+
+			amoclause.clear();
+			amoclause.push_back((helpervar<<1)^1);
+			amoclause.push_back(nexthelpervar<<1);
+#ifndef NDEBUG
+			rst = addClause(amoclause); assert( rst );
+#else
+			addClause(amoclause);
+#endif
+
+			amoclause.clear();
+			amoclause.push_back((selectinputs[i]<<1)^1);
+			amoclause.push_back((helpervar<<1)^1);
+#ifndef NDEBUG
+			rst = addClause(amoclause); assert( rst );
+#else
+			addClause(amoclause);
+#endif
+
+			helpervar = nexthelpervar;
+		  }
+
+		amoclause.clear();
+		amoclause.push_back((selectinputs[size]<<1)^1);
+		amoclause.push_back((helpervar<<1)^1);
+#ifndef NDEBUG
+		rst = addClause(amoclause); assert( rst );
+#else
+		addClause(amoclause);
+#endif
+
+		aone.push_back(selectinputs[size]<<1);
+#ifndef NDEBUG
+		rst = addClause(aone); assert( rst );
+#else
+		addClause(aone);
+#endif
+	  }
+
+	return result;
+  }
+
+  // Sets a variable "to be be maximized"
+  // This is the special case where the variable is swapped between two levels
+  // Assumes that all variables are already added
+  // Also assumes that level of "var" is set correctly (at least level 3)
+  // Returns the variable indices of the new introduced variables
+  multiplexervars Quantom::setSoftVariable (unsigned int var, unsigned int nonpreferredinputlevel, unsigned int preferredinputlevel)
+  {
+	//#ifdef DEBUG
+	std::cout << __func__ << " var: " << var << " nonpref: " << nonpreferredinputlevel << " preferred: " << preferredinputlevel << std::endl;
+	//#endif
+	assert( nonpreferredinputlevel > 0 );
+	assert( preferredinputlevel > 0 );
+
+	if ( getExtendedResult() == QUANTOM_UNSAT )
+	  { 
+		return multiplexervars();
+	  }
+
+	assert( var <= m_cores[0]->variables() );
+
+	unsigned int outvar = var;
+	unsigned int relaxvar = newVariable();
+	unsigned int zerovar = newVariable(nonpreferredinputlevel);
+	unsigned int onevar = newVariable(preferredinputlevel);
+
+	//setDontTouch(outvar);
+	setDontTouch(relaxvar);
+	//setDontTouch(zerovar);
+	//setDontTouch(onevar);
+
+#ifdef DEBUG
+	std::cout << __func__ << ":" << std::endl
+			  << "var: " << var << " relaxvar: " << relaxvar << std::endl
+			  << "non-preferred: " << zerovar << " preferred: " << onevar << std::endl;
+#endif
+
+
+	unsigned int softlevel = getMaxQLevel();
+	if( (softlevel&1) == 0 )
+	  { ++softlevel; }
+	setQVarLevel(var, softlevel);
+
+	std::vector< unsigned int > muxinputs;
+	muxinputs.push_back(zerovar);
+	muxinputs.push_back(onevar);
+
+	std::vector< unsigned int > selectinput;
+	selectinput.push_back(relaxvar);
+	selectinput.push_back(relaxvar);
+
+	std::vector< unsigned int > levels;
+	levels.push_back(nonpreferredinputlevel);
+	levels.push_back(preferredinputlevel);
+
+	std::vector< unsigned int > weights;
+	weights.push_back(0);
+	weights.push_back(1);
+	
+	multiplexervars result(muxinputs, selectinput, levels, weights, var);
+	m_softvariables.push_back(result);
+
+#ifndef NDEBUG
+	bool rst = false; 
+#endif
+	
+#ifdef DEBUG
+	std::cout << "ev: " << zerovar << " uv: " << onevar << " tv: " << relaxvar << " ov: " << outvar << std::endl;
+#endif
+
+	// Add multiplexer
+	std::vector< unsigned int > muxclause;
+	muxclause.reserve(3);
+
+	muxclause.push_back((outvar<<1)^1);
+	muxclause.push_back(relaxvar<<1);	
+	muxclause.push_back(zerovar<<1);
+
+#ifndef NDEBUG
+	rst = addClause(muxclause); assert( rst );
+#else
+	addClause(muxclause);
+#endif
+
+	muxclause.clear();
+	muxclause.push_back(outvar<<1);
+	muxclause.push_back(relaxvar<<1);	
+	muxclause.push_back((zerovar<<1)^1);
+
+#ifndef NDEBUG
+	rst = addClause(muxclause); assert( rst );
+#else
+	addClause(muxclause);
+#endif
+
+	muxclause.clear();
+	muxclause.push_back((outvar<<1)^1);
+	muxclause.push_back((relaxvar<<1)^1);	
+	muxclause.push_back(onevar<<1);
+
+#ifndef NDEBUG
+	rst = addClause(muxclause); assert( rst );
+#else
+	addClause(muxclause);
+#endif
+
+	muxclause.clear();
+	muxclause.push_back(outvar<<1);
+	muxclause.push_back((relaxvar<<1)^1);	
+	muxclause.push_back((onevar<<1)^1);
+
+#ifndef NDEBUG
+	rst = addClause(muxclause); assert( rst );
+#else
+	addClause(muxclause);
+#endif
+
+	// Add soft clause maximizing the select input of the multiplexer
+
+	muxclause.clear();
+
+	muxclause.push_back(relaxvar<<1);
+
+	addSoftClause(muxclause);
+
+	return result;
+  }
+
+  // Does not work using  "multiplexervars Quantom::setSoftVariable (unsigned int var, unsigned int zeroinputlevel, unsigned int oneinputlevel)"
+  // TODO
+
+  std::vector< std::pair< unsigned int, unsigned int > > Quantom::getAllSoftvarlevel( void )
+  {
+	const std::vector<unsigned int>& thismodel( model() );
+ 
+	std::vector< std::pair< unsigned int, unsigned int > > result;
+	for( unsigned int i = 0; i != m_softvariables.size(); ++i )
+	  {
+		unsigned int j = 0;
+		multiplexervars muxinput( m_softvariables[i] );
+		for(; j != muxinput.selectinput.size(); ++j )
+		  {
+			unsigned int selectinput( muxinput.selectinput[j] );
+
+			if( thismodel[selectinput] == ( selectinput<<1) )
+			  {
+				result.push_back( std::make_pair(muxinput.outputvar, muxinput.level[j]));
+				break;
+			  }
+		  }
+		assert( j < muxinput.selectinput.size() );
+	  }
+
+	return result;
+  }
+
+
+  // Checks whether soft clauses are satisfied "by chance" by the model "model", i.e. the trigger
+  // literal in a soft clause is set to TRUE, but the clause is satisfied without the trigger literal
+  // Returns the number of overall satisfied soft clauses
+  unsigned int Quantom::countSatisfiedSoftClauses( const std::vector< unsigned int >& model, const Quantom::ConstraintPart& part, bool unproceeded ) const
+  {
+	unsigned int result(0);
+	// Proceed all soft clauses
+	for( unsigned int i = 0 ; i != part.softclauses.size(); ++i )
+	  {
+		unsigned int triggerlit = part.softclauses[i]->s_triggerlit;
+
+		if( !unproceeded )
+		  { 
+			part.softclauses[i]->s_lastAssignment = model[triggerlit>>1]; 
+		  }
+
+		//std::cout << "tlit: " << getLit(triggerlit) << " d: " << m_cores[0]->isDeleted(triggerlit>>1) << " model: " << model[triggerlit>>1];
+		// Just proceed satisfied triggers
+		if( model[triggerlit>>1] == triggerlit )
+		  {
+			std::vector< unsigned int > clause( part.softclauses[i]->s_clause );
+			for( unsigned int pos = 0; pos != clause.size(); ++pos )
+			  {
+				// Skip non model variables
+				unsigned int var = (Lit(clause[pos])>>1);
+				if( getQuantLevel(var) > 1 )
+				  { assert( model[var] == 0 ); continue; }
+
+				// clause satisfied without trigger?
+				if( model[var] == clause[pos] )
+				  {
+					if( !unproceeded )
+					  { 
+						part.softclauses[i]->s_lastAssignment = (triggerlit^1); 
+					  }
+					//std::cout << " clause satisfied without trigger ";
+					++result;
+					break;
+				  }
+			  }
+		  }
+		else if ( !unproceeded )
+		  { 
+			//std::cout << " satisfied ";
+			assert( model[triggerlit>>1] != 0 );
+			assert( model[triggerlit>>1] == (triggerlit^1));
+			++result; 
+		  }
+		//std::cout << std::endl;
+	  }
+	//std::cout << "return " << result << " of " << part.softclauses.size() << std::endl;
+	return result;
+  }
+
+  void Quantom::setMaxBounds( int low, int high )
+  {
+	assert( low <= high );
+	m_low = low;
+	m_high = high;
+  }
+
+  // maxQBF
+  // mode 0: unsatisfiability based
+  // mode 1: satisfiability based
+  // mode 2: binary search based
+  // if opt < 0: standard maximization
+  // if opt >= 0: try to satisfy exact "opt" softclauses, return "10" if possible, "20" otherwise
+  unsigned int Quantom::maxSolve ( int& opt, std::vector< unsigned int >& externalAssumptions, unsigned int mode, unsigned int id )
+  {
+	assert( id < m_cores.size() );
+
+	struct rusage resources;
+	getrusage(RUSAGE_SELF, &resources); 
+	double timeS = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+	m_control->setStartTime(timeS);
+	m_control->setSumTime(true);
+
+	unsigned int size(m_softclauses.size()); 
+
+   	if( size == 0 )
+	  { 
+		std::vector< unsigned int > tmpassumption = externalAssumptions;
+		unsigned int res = solve(tmpassumption); 
+		opt = 0;
+		return res;
+	  }
+ 
+    // Mark all soft clause trigger as "Don't Touch"
+	// Mark also all literals in soft clauses as don't touch
+	/*
+    for( unsigned int i = 0; i != size; ++i )
+      { 
+		setDontTouch(m_softclauses[i].s_triggerlit>>1); 
+		for( unsigned int j = 0; j != m_softclauses[i].s_clause.size(); ++j )
+		  {
+			setDontTouch( Lit(m_softclauses[i].s_clause[j])>>1 );
+		  }
+      }
+	*/
+
+	if( m_preprocess )
+	  { 
+		unsigned int res = preprocess();
+
+		if( res == QUANTOM_UNSAT )
+		  {
+			opt = 0;
+			return QUANTOM_UNSAT;
+		  }
+		// Timeout?
+		else if( res == QUANTOM_UNKNOWN )
+		  {
+			struct rusage resources;
+			getrusage(RUSAGE_SELF, &resources); 
+			double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+			//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			if ( ( m_control->getCPULimit() > 0.0 ) && m_control->reachedTimeout(timeC) ) 
+			  { 
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN; 
+			  }
+		  }
+		m_cores[id]->setPreprocessor(false);
+	  }
+
+    unsigned int result(QUANTOM_UNKNOWN);
+	unsigned int currentresult(QUANTOM_UNKNOWN);
+	bool partialmode(false);
+
+	if( mode < 3 )
+	  {
+		// Add the "Bitonic Sorting Network" to the clause database. 
+		// Collect trigger clauses of soft variables
+		Quantom::ConstraintPart part( m_softclauses.size() );
+
+		for( unsigned int i = 0; i != m_softclauses.size(); ++i )
+		  { 
+			part.currenttrigger.push_back(m_softclauses[i].s_triggerlit>>1);
+			part.softclauses.push_back(&m_softclauses[i]);
+		  }
+
+		// if( m_maxinprocess )
+		//   {
+		// 	currentresult = inprocess(); 
+		// 	if ( currentresult == QUANTOM_UNSAT ) 
+		// 	  {  return QUANTOM_UNSAT; }
+		//   }
+		setPreprocessor(false,id);
+
+		assert( m_dummyvar == 0 );
+		m_dummyvar = newVariable();
+
+#ifndef NDEBUG
+		bool rst(false); rst = addUnit((m_dummyvar<<1)); assert( rst );
+#else
+		addUnit((m_dummyvar<<1));
+#endif
+
+		findSorterCSC(part);
+		createBitonicMaximizer(part);
+
+		if( m_control->getVerbosity() > 1 )
+		  {
+			std::cout << "c comparator: " << m_comparator << " skipped: " << m_skipped << std::endl;
+			std::cout << "c horizontal bypasses: " << m_horizontalbypasses << " vertical bypasses: " << m_verticalbypasses << std::endl;
+		  }
+	  }
+	else 
+	  { 
+		if ( mode == 4 ) 
+		  { partialmode = true; }
+		mode = 1; 
+	  }
+
+	Quantom::ConstraintPart part = m_pendingConstraints.front();
+	unsigned int partsize = part.size();
+
+	if ( !partialmode && m_control->getVerbosity() > 1 )
+	  { std::cout << "c softclauses: " << m_softclauses.size() << std::endl; }
+
+	if( m_control->getVerbosity() > 3 )
+	  {
+		std::cout << "current trigger: " << std::endl;
+		trivialAssignment();
+		for( unsigned int i = 0; i != partsize; ++i )
+		  {
+			if( i < part.softclauses.size() )
+			  {
+				std::cout << " " << i << " " << part.currenttrigger[i] << " [" << getLit(model()[part.currenttrigger[i]]) << "] ";
+				std::cout << " clause: ";
+				for( unsigned int j = 0 ; j != part.softclauses[i]->s_clause.size(); ++j )
+				  { std::cout << getLit( part.softclauses[i]->s_clause[j]) << " d: " << m_cores[0]->isDeleted( part.softclauses[i]->s_clause[j]>>1) << " "; }
+				std::cout << " trigger: " << getLit(part.softclauses[i]->s_triggerlit) << " d: " << m_cores[0]->isDeleted(part.softclauses[i]->s_triggerlit>>1) << std::endl;
+			  }
+		  }
+	  }
+
+    // Initialization.
+    const std::vector<unsigned int>& tmodel(model(id));
+    unsigned int currentBestResult(0);
+	unsigned int pos(0); 
+
+	// for incremental mode we may need to collect all assumptions...
+	std::vector<unsigned int> collectedAssumptions = externalAssumptions;
+
+	if( m_low > 0 )
+	  {
+		assert( m_low <= (int)partsize );
+
+		unsigned int lowlit(part.currenttrigger[partsize-m_low]<<1);
+		if( partialmode )
+		  {
+			collectedAssumptions.push_back(lowlit);
+		  }
+		else
+		  {
+#ifndef NDEBUG
+			bool rst(false); rst = addUnit((lowlit), id); assert( rst );
+#else
+			addUnit(lowlit, id);
+#endif
+		  }
+	  }
+
+	if( m_high > 0 )
+	  {
+		assert( m_high <= (int)partsize );
+
+		unsigned int highlit((part.currenttrigger[partsize-m_high-1]<<1)^1);
+
+		if( partialmode )
+		  {
+			collectedAssumptions.push_back(highlit);
+		  }		
+		else if( !addUnit( highlit, id ) )
+		  {
+			m_control->setSumTime(false);
+			return QUANTOM_UNSAT;
+		  }
+	  }
+
+	unsigned int t( partsize );
+	unsigned int res(QUANTOM_UNKNOWN);
+
+	switch( mode )
+	  {
+		// UNSAT based:
+	  case 0: 
+
+		pos = partsize;
+		currentresult = QUANTOM_UNSAT; 
+		currentBestResult = size;
+
+		if( m_high > 0 )
+		  { currentBestResult = size-m_high-1; }
+
+		if( m_low > 0 )
+		  { pos = size-m_low-1; }
+
+		// search for upper bound
+		do {
+		  --t;
+		  collectedAssumptions.push_back( (part.currenttrigger[t]<<1)^1 );
+		  res = deduceAssumptions(collectedAssumptions, id );	
+		  collectedAssumptions.pop_back();
+		} while ( (res==QUANTOM_UNSAT) && (t != 0) );
+
+		pos = t+1;
+
+		while( true )
+		  {
+			--pos;
+
+			if( m_control->getVerbosity() > 0 )
+			  { std::cout << "c checking o = " << (size - pos - 1 ) << "..." << std::endl; }
+
+			//unsigned int assumption( collectedAssumptions.back() );
+			collectedAssumptions.push_back( (part.currenttrigger[pos]<<1)^1 );
+
+			currentresult = solve(collectedAssumptions,id);
+
+			// Have we found the optimum?
+			if (currentresult == QUANTOM_SAT)
+			  { 
+				result = QUANTOM_SAT;
+				// Update "optimum".	
+				pos = countSatisfiedSoftClauses(model(), part);
+				opt  = size - pos;
+				break; 
+			  }
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  { 
+				assert( m_control->getCPULimit() > 0.0 );
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;
+			  }
+
+			if( partialmode )
+			  { 
+				assert( !collectedAssumptions.empty() );
+				collectedAssumptions[collectedAssumptions.size()-1] ^= 1;
+			  }
+			else
+			  {
+				unsigned int assumption( collectedAssumptions.back() );
+				// Remove from collected assumption
+				collectedAssumptions.pop_back();
+
+#ifndef NDEBUG
+				bool rst = addUnit(assumption^1,id); assert(rst);
+#else
+				addUnit(assumption^1,id);
+#endif
+			  }
+
+			if( m_maxinprocess )
+			  {
+				currentresult = inprocess(id); 
+				// If inproccesing leads to UNSAT, we are done without result
+				if( currentresult == QUANTOM_UNSAT )
+				  {
+					result = QUANTOM_UNSAT;
+					break;
+				  }
+				else if ( currentresult == QUANTOM_SAT ) 
+				  { 
+					result = QUANTOM_SAT; 
+					opt  = size - pos - 1;
+					break;
+				  }
+				
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				// std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+
+			// Did we reached the last element?
+			if( pos == 0 )
+			  { 
+				opt = (int)currentBestResult;
+				result = solve(collectedAssumptions);
+				break; 
+			  }
+	      }
+
+		m_control->setSumTime(false);
+		return result;
+		
+		//SAT based:
+	  case 1:
+
+		result = QUANTOM_UNSAT;
+
+		// try to solve with no soft clause satisfied
+		if( m_skipinitbychance )
+		  {
+			// Add default minimum amont of satisfied clauses
+			unsigned int litbound( (part.currenttrigger[0] << 1) ^ 1 ); 
+
+			if( partialmode )
+			  {
+				collectedAssumptions.push_back(litbound);
+			  }
+			else 
+			  {
+				if( !addUnit( litbound, id ) )
+				  { 
+					opt = 0;
+					return QUANTOM_UNSAT; 
+				  }
+			  }
+
+			currentresult = solve(collectedAssumptions, id );
+
+			// Pure instance is unsat
+			if( currentresult == QUANTOM_UNSAT )
+			  { return QUANTOM_UNSAT; }
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  { 
+				assert( m_control->getCPULimit() > 0.0 );
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;
+			  }
+			else 
+			  { result = currentresult; }
+
+			// Try to satisfy more soft clauses by chance.	    
+			const std::vector<unsigned int>& newModel(model());
+
+#ifndef NDEBUG
+			unsigned int oldpos = pos;
+#endif
+			pos = countSatisfiedSoftClauses( newModel, part );
+
+#ifndef NDEBUG
+			assert(pos > oldpos);
+#endif
+			currentBestResult = pos;
+
+			opt = (int)(size - pos);
+
+			if( m_control->getVerbosity() > 0 && !partialmode )
+			  {
+				std::cout << "o " << (size - pos) << std::endl;
+			  }
+
+			// Have we found the very special case with all trigger variables set to FALSE?
+			if (partsize == pos)
+			  { 
+				// Update "optimum".
+				opt = (int)(size - pos);
+
+				return result;				
+			  }
+
+			// Set new unit for first solver call in loops
+			litbound = (part.currenttrigger[pos] << 1) ^ 1; 
+
+			if( partialmode )
+			  {
+				collectedAssumptions.push_back(litbound);
+			  }
+			else 
+			  {
+				if( !addUnit( litbound, id ) )
+				  { 
+					opt = (int)(size - pos);
+
+					return result;
+				  }
+			  }
+
+			if( m_maxinprocess )
+			  {
+				currentresult = inprocess(id);
+				if ( currentresult != QUANTOM_UNKNOWN ) 
+				  { 
+					return currentresult; 
+				  }
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << " " << m_control->reachedTimeout(timeC) << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+		  }
+		
+		while ( true )
+		  {
+			currentresult = solve(collectedAssumptions,id);
+
+			// Found optimum!
+			if( currentresult == QUANTOM_UNSAT )
+			  { break; }
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  { 
+				assert( m_control->getCPULimit() > 0.0 );
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;
+			  }
+			else 
+			  { result = currentresult; }
+
+			// Try to satisfy more soft clauses by chance.	    
+			const std::vector<unsigned int>& newModel(model());
+
+#ifndef NDEBUG
+			unsigned int oldpos = pos;
+#endif
+			pos = countSatisfiedSoftClauses( newModel, part );
+#ifndef NDEBUG
+			assert(pos > oldpos || pos == 0);
+#endif
+
+			currentBestResult = pos;
+
+			if( m_control->getVerbosity() > 0 && !partialmode )
+			  {
+				std::cout << "o " << (size - pos) << std::endl;
+			  }
+
+			// Have we found the very special case with all trigger variables set to FALSE?
+			if (partsize == pos)
+			  { break; }
+
+			// add this point we know there is a solution with "pos" triggers set to false.
+			// Check if there is a solution with "pos+1" triggers set to false.
+
+			unsigned int litbound( (part.currenttrigger[pos] << 1) ^ 1 ); 
+
+			if( partialmode )
+			  {
+				collectedAssumptions.push_back(litbound);
+			  }
+			else 
+			  {
+				if( !addUnit( litbound, id ) )
+				  { break; }
+			  }
+
+			if( m_maxinprocess )
+			  {
+				currentresult = inprocess(id);
+				if ( currentresult != QUANTOM_UNKNOWN ) 
+				  { 
+					result = QUANTOM_SAT; 
+					break;
+				  }
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << " " << m_control->reachedTimeout(timeC) << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+		  }
+
+		// Update "optimum".
+		opt = (int)(size - pos);
+
+		return result;
+
+		// Binary search
+	  case 2: 
+
+		unsigned int min = 0;
+		unsigned int max = size;
+
+		currentresult = solve(collectedAssumptions,id);
+
+		if( currentresult == QUANTOM_UNSAT )
+		  { min = max; m_control->setSumTime(false); return QUANTOM_UNSAT; }
+		else if( currentresult == QUANTOM_UNKNOWN )
+		  { 
+			assert( m_control->getCPULimit() > 0.0 );
+			m_control->setSumTime(false);
+			return QUANTOM_UNKNOWN;
+		  }
+
+
+		// a lazy quick and dirty way to preserve the best model
+		std::vector< unsigned int > bestmodel = model(id);
+
+		min = countSatisfiedSoftClauses( tmodel, part );
+
+		// search for upper bound
+		do {
+		  --t;
+		  collectedAssumptions.push_back( (part.currenttrigger[t]<<1)^1 );
+		  res = deduceAssumptions(collectedAssumptions, id );	
+		  collectedAssumptions.pop_back();
+		} while ( (res==QUANTOM_UNSAT) && (t != 0) );
+
+		max = t+1;
+
+		pos = (min+max-1) >> 1;
+
+		currentBestResult = size-min;
+		if( m_control->getVerbosity() > 1 )
+		  {
+			std::cout << "c known bounds: (" << (size-max) << " / " << (size-min) << ")" << std::endl;
+		  }
+
+		while( min < max )
+		  {
+			if( m_control->getVerbosity() > 1 )
+			  {
+				std::cout << "c TRY with " << (size-pos-1) << std::endl;
+			  }
+
+			collectedAssumptions.push_back( (part.currenttrigger[pos]<<1)^1);
+
+			currentresult = solve(collectedAssumptions,id);
+
+			// SAT
+			if( currentresult == QUANTOM_SAT )
+			  {
+				result = QUANTOM_SAT;
+				bestmodel = model(id);
+
+				if( m_control->getVerbosity() > 1 )
+				  {
+					std::cout << "c Found with " << (size-pos-1) << std::endl;
+				  }
+
+				// Try to satisfy clauses by chance...
+				min = countSatisfiedSoftClauses(tmodel, part);
+
+				currentBestResult = size-min;
+
+				if( m_control->getVerbosity() > 0 )
+				  {
+					std::cout << "o " << currentBestResult << std::endl;
+				  }
+			  }
+			// UNSAT
+			else if( currentresult == QUANTOM_UNSAT )
+			  {
+				if( m_control->getVerbosity() > 1 )
+				  {
+					std::cout << "c Failed with " << (size-pos-1) << std::endl;
+				  }
+
+				max = pos;
+
+				assert( !collectedAssumptions.empty() );				
+				collectedAssumptions[collectedAssumptions.size()-1] ^= 1;
+			  }
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  { 
+				assert( m_control->getCPULimit() > 0.0 );
+				std::cout << "c Timeout reached " << std::endl; 
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;
+			  }
+			else
+			  { assert(false); }
+			
+			if( !partialmode )
+			  {
+#ifndef NDEBUG
+				bool rst(false); rst = addUnit( collectedAssumptions.back(), id ); assert( rst );
+#else
+				addUnit( collectedAssumptions.back() );
+#endif
+				collectedAssumptions.pop_back();
+			  }
+
+			if( m_maxinprocess )
+			  {
+				currentresult = inprocess(id);
+				if ( currentresult != QUANTOM_UNKNOWN ) 
+				  { 
+					result = QUANTOM_SAT; 
+					break;
+				  }
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() <<  " " << m_control->reachedTimeout(timeC) << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+
+			pos = (min+max-1)>>1;
+
+			if( m_control->getVerbosity() > 1 )
+			  {
+				std::cout << "c known bounds: (" << (size-max) << " / " << (size-min) << ")" << std::endl;
+			  }
+		  }
+
+		opt = (int)currentBestResult;
+
+		// solve without any assumptions in case all triggers have to be "1"
+		if ( currentBestResult > 0 )
+		  { 
+			std::vector< unsigned int > model_assumption;
+			// solve with the best found model, so that the antom-model is set correctly 
+			// just add the model for the original clauses. 
+			// Due to our "by chance" method the virtual best model is not complete
+			for ( unsigned int m = 0; m != part.size(); ++m )
+			  {
+				if( bestmodel[part.currenttrigger[m]] != 0 )
+				  { model_assumption.push_back(bestmodel[part.currenttrigger[m]]);}
+			  }
+
+			// this is the quick and dirty way! TODO
+			currentresult = solve(model_assumption, id );
+			result = currentresult;
+			assert( currentresult == QUANTOM_SAT );
+			opt = currentBestResult;
+		  }
+
+		m_control->setSumTime(false);
+		return result;
+	  }
+
+	assert(false);
+	return QUANTOM_UNKNOWN;
+  }
+
+  /* TODO assumption interface */
+  unsigned int Quantom::maxSolveIncremental ( int& optimum, unsigned int mode )
+  {
+	// Consistency checks.
+    assert(mode <= 3); 
+
+	struct rusage resources;
+	getrusage(RUSAGE_SELF, &resources); 
+	double timeS  = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+	m_control->setStartTime(timeS);
+	m_control->setSumTime(true);
+
+	unsigned int size(m_softclauses.size()); 
+	unsigned int currentresult(QUANTOM_UNKNOWN);
+	unsigned int result(QUANTOM_UNKNOWN);
+	unsigned int depth(0);
+	unsigned int part(0);
+	unsigned int maxmode(4);
+	unsigned int currentoptimum(size+1);
+	optimum = size+1;
+
+	bool firstsolve(false);
+
+	// calc and set all trivially conflicting softclauses
+	checkAllConflictingSoftclauses();
+	calcSplitWidth();
+
+	unsigned int prepart(0);
+	// build datastructure for parts
+	while( prepart*m_splittedWidth < size )
+	  {
+		unsigned int s ( prepart*m_splittedWidth );
+		unsigned int maxsize = s+m_splittedWidth;
+
+		if( size < maxsize )
+		  { maxsize = size; }
+		
+		Quantom::ConstraintPart part(m_splittedWidth);
+
+		for( ; s < maxsize; ++s )
+		  { 
+			part.currenttrigger.push_back(m_softclauses[s].s_triggerlit>>1);
+			part.softclauses.push_back(&m_softclauses[s]);
+		  }
+		m_Constraints.push_back(part);
+		++prepart;
+	  }
+
+	// Reverse 
+	unsigned int end = m_Constraints.size();
+	unsigned int start = 0;
+	while ((start != end) && (start != --end)) 
+	  { std::swap(m_Constraints[start++], m_Constraints[end]); }
+
+	if ( m_control->getVerbosity() > 1 )
+	  { std::cout << "c softclauses: " << size << std::endl; }
+
+	if( size == 0 )
+	  { return solve(); }
+
+	currentoptimum = size;
+	std::vector< unsigned int > externalAssumptions;
+
+	assert( m_dummyvar == 0 );
+	m_dummyvar = newVariable();
+
+#ifndef NDEBUG
+	bool rst(false); rst = addUnit((m_dummyvar<<1)); assert( rst );
+#else
+	addUnit((m_dummyvar<<1));
+#endif
+
+	if ( m_control->getVerbosity() > 1 )
+	  { std::cout << "c start solving depth " << depth << " width: " << m_splittedWidth << std::endl; }
+
+	switch ( mode )
+	  {
+	  case 0: 
+		// Depth-first-seach mode
+		do
+		  {
+			unsigned int partsize = m_Constraints.size();
+			
+			// create partial sorter as base case
+			// Either there is only one candidate on stack or just one candidate with the correct depth
+			if( ( partsize < 2 || m_Constraints[0].depth < m_Constraints[1].depth ) && ( !m_Constraints.empty() ) )
+			  {
+				// Create sorter for part "part" 
+				createPartialBitonicMaximizer( part );
+				++part;
+
+				if( m_control->getVerbosity() > 1 )
+				  {
+					std::cout << "c comparator: " << m_comparator << " skipped: " << m_skipped << std::endl;
+					std::cout << "c horizontal bypasses: " << m_horizontalbypasses << " vertical bypasses: " << m_verticalbypasses << std::endl;
+				  }
+			  }
+			// In non base case take first two part and merge
+			else
+			  {
+				assert( partsize > 1 );
+
+				// Now merge sorters
+
+				Quantom::ConstraintPart tempVariables1 = m_pendingConstraints[0];
+				m_pendingConstraints.pop_front();
+				Quantom::ConstraintPart tempVariables2 = m_pendingConstraints[0];
+				m_pendingConstraints.pop_front();
+
+				mergePartTrigger( tempVariables1, tempVariables2, size );
+
+				currentoptimum = currentoptimum + (size-tempVariables2.optimum);
+
+				if( size != tempVariables2.optimum )
+				  {
+					unsigned int lit = (tempVariables2.currenttrigger[size-tempVariables2.optimum-1]<<1)^1;
+					tempVariables2.assumption = lit;
+				  }
+
+				// Pushed merged list in front
+				m_pendingConstraints.push_front(tempVariables2);
+			  }
+
+			// Add assumptions
+			externalAssumptions.clear(); 
+			// Add partial bounds to assumptions
+			for( unsigned int i = 0 ; i != m_pendingConstraints.size(); ++i )
+			  {
+				if( m_pendingConstraints[i].assumption != 0 )
+				  { 
+					externalAssumptions.push_back(m_pendingConstraints[i].assumption);
+				  }
+			  }
+
+			setSoftTrigger( externalAssumptions, m_pendingConstraints.front() );
+
+			// solve (merged) instance 
+			int partialoptimum = (int)size;
+
+			if( m_control->getVerbosity() > 1 )
+			  {
+				unsigned int sum(0);
+				std::cout << "c ";
+				for( unsigned int i = 0; i != m_pendingConstraints.size(); ++i )
+				  {
+					std::cout << m_pendingConstraints[i].softclauses.size() << " (" << m_pendingConstraints[i].depth << "), ";
+					sum += m_pendingConstraints[i].softclauses.size();
+				  }
+				std::cout << " (" << sum << "," << m_softclauses.size() << ")" << std::endl;
+			  }
+
+			// We solve the last part -> we can "unit" the bounds 
+			if( m_pendingConstraints.front().softclauses.size() >= m_softclauses.size() )
+			  { maxmode = 5; }
+
+			if( m_maxinprocess )
+			  { 
+				currentresult = inprocess(); 
+
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << " " << m_control->reachedTimeout(timeC) << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+			else
+			  { currentresult = QUANTOM_UNKNOWN; }
+
+			// The part to solve is always in front of "m_partialTriggerParts"
+			currentresult = maxSolve( partialoptimum, externalAssumptions, maxmode );
+			m_control->setSumTime(true);
+
+			m_pendingConstraints.front().optimum = partialoptimum;
+
+			if( currentresult == QUANTOM_SAT )
+			  {
+				result = QUANTOM_SAT;
+
+				currentoptimum = partialoptimum - updateTriggerOptimum();
+			
+				if( (int)currentoptimum < optimum )
+				  { 
+					if ( m_control->getVerbosity() > 0 )
+					  { 
+						if ( m_control->getVerbosity() > 0 )
+						  { 
+							std::cout << "o " << optimum << std::endl; 
+							if( m_control->getVerbosity() > 1 )
+							  {
+								getrusage(RUSAGE_SELF, &resources); 
+								double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+								std::cout << "c " << (timeC-timeS) << "s" << std::endl;
+							  }
+						  }
+					  }
+				  }
+
+				unsigned int lit = (m_pendingConstraints.front().currenttrigger[size-partialoptimum-1]<<1)^1;
+				m_pendingConstraints.front().assumption = lit;
+
+				std::cout << "trigger assumption: " << Lit(lit) << std::endl;
+				
+				if ( m_control->getVerbosity() > 1 )
+				  { std::cout << "c partial optimum: " << currentoptimum << std::endl; } 
+			  }
+			else if( currentresult == QUANTOM_UNSAT )
+			  {
+				m_control->setSumTime(false);
+				return QUANTOM_UNSAT;
+			  }
+			// Timeout
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  {
+				assert( m_control->getCPULimit() > 0.0 );
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;				
+			  }
+
+			// We have only one current part left (not the last one)
+			// Then we can "unit" the upper bound
+			if( ( m_pendingConstraints.size() == 1 ) && ( m_pendingConstraints.front().softclauses.size() < m_softclauses.size() ) && ( ( size-partialoptimum ) < m_pendingConstraints.front().size() ) )
+			  {
+					
+				unsigned int lit = (m_pendingConstraints.front().currenttrigger[size-partialoptimum]<<1);
+#ifndef NDEBUG
+				bool rst = addUnit(lit); assert(rst);
+#else
+				addUnit(lit);
+#endif
+			  }
+		  	// Do until one part is left and all parts are considered
+		  } while ( ( m_Constraints.size() > 1 ) || ( part*m_splittedWidth < size ) );
+		
+		
+		break;	
+	  case 1:
+		// Breadth-first mode
+
+		// get first depth
+		currentresult = calcFirstDepth( result, currentoptimum, optimum, externalAssumptions, maxmode );
+
+		if( currentresult == QUANTOM_UNSAT )
+		  {
+			m_control->setSumTime(false);
+			return QUANTOM_UNSAT;
+		  }
+		// Timeout
+		else if( currentresult == QUANTOM_UNKNOWN )
+		  {
+			assert( m_control->getCPULimit() > 0.0 );
+			m_control->setSumTime(false);
+			return QUANTOM_UNKNOWN;				
+		  }
+		
+		// All soft clauses in one part -> we can stop here
+		// We also stop in incomplete mode
+		if( m_pendingConstraints.size() == 1 )
+		  { break; }
+
+		// Now start merging sorters
+		do
+		  {
+			// Now merge sorters together
+			Quantom::ConstraintPart tempVariables = m_pendingConstraints.back();
+			m_pendingConstraints.pop_back();
+
+			// Get next element to merge
+			if( !m_pendingConstraints.empty() && tempVariables.depth == m_pendingConstraints.back().depth )
+			  {
+				// next trigger
+				Quantom::ConstraintPart tempVariables2 = m_pendingConstraints.back();
+
+				// Reset optimum for next depth if we have computed last element of current depth
+				if( tempVariables.depth > depth )
+				  {
+					if ( m_control->getVerbosity() > 1 )
+					  { std::cout << "c overall optimum for depth " << (depth+1) << ": " << currentoptimum << std::endl; }
+					++depth;
+					externalAssumptions.clear();
+					currentoptimum = size;
+					firstsolve = true;
+					
+					// Clear last trigger values on new level
+					// Otherwise we are not able to unit the first element of this depth
+					for( unsigned int i = 0; i != m_pendingConstraints.size(); ++i )
+					  {
+						for( unsigned int j = 0; j != m_pendingConstraints[i].softclauses.size(); ++j )
+						  {
+							m_pendingConstraints[i].softclauses[j]->s_lastAssignment = 0;
+						  }
+					  }
+
+				  }
+
+				m_pendingConstraints.pop_back();
+				mergePartTrigger( tempVariables, tempVariables2, size );
+
+				if( tempVariables2.optimum < size)
+				  {
+					unsigned int lit = (tempVariables2.currenttrigger[size-tempVariables2.optimum-1]<<1)^1;
+					externalAssumptions.push_back(lit);
+				  }
+
+				// Pushed merged list at the end
+				m_pendingConstraints.push_front(tempVariables2);
+			  }
+			// reached last element of current depth
+			else
+			  { 
+				++tempVariables.depth;
+				// Just push the current last element to last position in order to solve it as next instance
+				m_pendingConstraints.push_front(tempVariables);
+			  }
+
+			assert( !m_pendingConstraints.empty() );
+			// At this point the current part to solve is at the end of the dequeue
+
+			std::vector< unsigned int > localAssumptions = externalAssumptions;
+
+			setSoftTrigger( localAssumptions, m_pendingConstraints.front() );
+
+			int partialoptimum = (int)size;
+
+			if( m_control->getVerbosity() > 1 )
+			  {
+				unsigned int sum(0);
+				std::cout << "c ";
+				for( unsigned int i = 0; i != m_pendingConstraints.size(); ++i )
+				  {
+					std::cout << m_pendingConstraints[i].softclauses.size() << " (" << m_pendingConstraints[i].depth << "), ";
+					sum += m_pendingConstraints[i].softclauses.size();
+				  }
+				std::cout << " (" << sum << "," << m_softclauses.size() << ")" << std::endl;
+			  }
+
+			// Last element -> we can "unit" bounds
+			if( m_pendingConstraints.front().softclauses.size() >= m_softclauses.size() )
+			  { maxmode = 5; }
+
+			if( m_maxinprocess )
+			  { 
+				currentresult = inprocess(); 
+
+				// reached timeout?
+				struct rusage resources;
+				getrusage(RUSAGE_SELF, &resources); 
+				double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+				//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << " " << m_control->reachedTimeout(timeC) << std::endl;
+				if ( m_control->reachedTimeout(timeC) ) 
+				  { 
+					m_control->setSumTime(false);
+					return QUANTOM_UNKNOWN; 
+				  }
+			  }
+			else
+			  { currentresult = QUANTOM_UNKNOWN; }
+
+			// Maximize partial sorter
+			currentresult = maxSolve( partialoptimum, localAssumptions, maxmode );
+			m_control->setSumTime(true);
+
+			assert( currentresult == QUANTOM_UNSAT || partialoptimum <= (int)size );
+			m_pendingConstraints.front().optimum = partialoptimum;
+
+			assert(currentresult != QUANTOM_UNSAT );
+
+			if( currentresult == QUANTOM_SAT )
+			  {
+				result = QUANTOM_SAT;
+			
+				currentoptimum = partialoptimum - updateTriggerOptimum();
+
+				if ( m_control->getVerbosity() > 1 )
+				  { std::cout << "c current optimum: " << currentoptimum << std::endl; } 
+
+				if ( maxmode != 5 && ( m_control->getVerbosity() > 0 ) && ( (int)currentoptimum < optimum ) )
+				  { 
+					optimum = currentoptimum;
+					std::cout << "o " << optimum << std::endl; 
+					if( m_control->getVerbosity() > 1 )
+					  {
+						getrusage(RUSAGE_SELF, &resources); 
+						double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+						std::cout << "c " << (timeC-m_control->getStartTime()) << "s" << std::endl;
+					  }
+				  }
+				
+				if( (int)size != partialoptimum )
+				  {
+					unsigned int pos = size-partialoptimum-1;
+					unsigned int lit = (m_pendingConstraints.front().currenttrigger[pos]<<1)^1;
+
+					externalAssumptions.push_back( lit );
+				  }
+
+				// "unit" bounds for the first element
+				// Except for very last unit. This unit is already added in opposite polarty in "maxSolve"
+				if( firstsolve && (maxmode != 5 ) && ((size-(unsigned int)partialoptimum)<m_pendingConstraints.front().size() ))
+				  {
+					unsigned int lit = (m_pendingConstraints.front().currenttrigger[size-partialoptimum]<<1);
+#ifndef NDEBUG
+					bool rst = addUnit(lit); assert(rst);
+#else
+					addUnit(lit);
+#endif
+				  }
+				firstsolve = false;
+			  }
+			// Timeout
+			else if( currentresult == QUANTOM_UNKNOWN )
+			  {
+				assert( m_control->getCPULimit() > 0.0 );
+				m_control->setSumTime(false);
+				return QUANTOM_UNKNOWN;				
+			  }
+
+		  } while( m_pendingConstraints.size() > 1 );
+
+		break;
+	  default:
+		assert( false );
+		break;
+	  }
+
+	optimum = currentoptimum;
+	if ( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "comparator: " << m_comparator << " skipped: " << m_skipped << std::endl;
+	  }
+
+	m_control->setSumTime(false);
+	return result;
+  }
+
+  void Quantom::checkAllConflictingSoftclauses( void )
+  {
+	if( !m_setCSC )
+	  { return; }
+	unsigned int size( m_softclauses.size() );
+
+	if( m_control->getVerbosity() > 1 )
+	  { std::cout << "c " << __func__ << " " << size << std::endl; }
+
+	unsigned int bypasses(0);
+	unsigned int unsats(0);
+
+	for( unsigned int i = 0; i != size; ++i )
+	  {
+		std::vector< unsigned int > assumptions;
+		unsigned int lit( m_softclauses[i].s_triggerlit );
+		assumptions.push_back( lit^1 );
+
+		// Deduce activation of current soft clause
+		unsigned int result = deduceAssumptions(assumptions);
+		m_softclauses[i].s_contra = 0;
+		m_softclauses[i].s_simultan = 0;
+
+		// Instance is not solveable if current soft clause is activated
+		if( result == QUANTOM_UNSAT )
+		  {
+			if( m_softclauses[i].s_clause.size() == 1 )
+			  { lit = m_softclauses[i].s_clause[0]^1; }
+#ifndef NDEBUG
+			bool rst = addUnit( lit ); assert( rst );
+#else
+			addUnit( lit );
+#endif
+			++unsats;
+		  }			
+		else
+		  {
+			std::vector< unsigned int > solvermodel = model();
+
+			// Check model
+			for( unsigned int j = 0; j < size; ++j )
+			  {
+				unsigned int checklit( m_softclauses[j].s_triggerlit );
+				assert( (checklit>>1) < solvermodel.size() );
+				// Contradiction... j'th soft clause is deactivated if i'th soft clause is activated
+				if( solvermodel[checklit>>1] == checklit )
+				  {
+					++bypasses;
+					++m_softclauses[i].s_contra;
+					std::vector < unsigned int > clause( 2, 0 );
+					clause[0] = lit;
+					clause[1] = checklit;
+#ifndef NDEBUG
+					bool rst = addClause(clause); assert(rst);
+#else
+					addClause(clause);
+#endif
+				  }
+				// The i'th and j'th soft clause can be activated at once
+				else if( ( i != j ) && ( solvermodel[checklit>>1] == (checklit^1) ) )
+				  {
+					++bypasses;
+					++m_softclauses[i].s_simultan;
+					std::vector < unsigned int > clause( 2, 0 );
+					clause[0] = lit;
+					clause[1] = (checklit)^1;
+#ifndef NDEBUG
+					bool rst = addClause(clause); assert(rst);
+#else
+					addClause(clause);
+#endif
+				  }
+			  }
+		  }
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  { std::cout << std::endl << "c find overall " << bypasses << " bypasses and " << unsats << " unsats" << std::endl; }
+  }
+
+  // Search in soft clauses for sorter bypasses by "deduceAssumption"
+  void Quantom::findSorterCSC( Quantom::ConstraintPart& part )
+  {
+	if( !m_setCSC )
+	  { return; }
+	unsigned int size( part.size() );
+	unsigned int softclausessize( part.softclauses.size() );
+
+	if( m_control->getVerbosity() > 1 )
+	  { 
+		std::cout << "c " << __func__ << " " << size << std::endl; 
+	  }
+
+	part.mincontra = size;
+	part.maxsimultan = 0;
+
+	unsigned int unsats(0);
+	unsigned int bypasses(0);
+
+	for ( unsigned int i = 0; i != softclausessize; ++i )
+	  {
+		std::vector< unsigned int > assumptions;
+		unsigned int lit( part.softclauses[i]->s_triggerlit );
+
+		part.softclauses[i]->s_contra = 0;
+		part.softclauses[i]->s_simultan = 0;
+
+		assumptions.push_back( lit^1 );
+
+		// Deduce activation of current soft clause
+		unsigned int result = deduceAssumptions(assumptions);
+
+		// Instance is not solveable if current soft clause is activated
+		if( result == QUANTOM_UNSAT )
+		  {
+#ifndef NDEBUG
+			bool rst = addUnit( lit ); assert( rst );
+#else 
+			addUnit( lit );
+#endif
+			++unsats;
+		  }
+		else
+		  {
+			std::vector< unsigned int > solvermodel = model();
+
+			// Check model
+			for( unsigned int j = 0; j != softclausessize; ++j )
+			  {
+				unsigned int checklit( part.softclauses[j]->s_triggerlit );
+				assert( (checklit>>1) < solvermodel.size() );
+				// Contradiction... j'th soft clause is deactivated if i'th soft clause is activated
+				if( solvermodel[checklit>>1] == checklit )
+				  {
+					++part.softclauses[i]->s_contra;
+
+					std::vector < unsigned int > clause( 2, 0 );
+					clause[0] = lit;
+					clause[1] = checklit;
+#ifndef NDEBUG
+					bool rst = addClause(clause); assert(rst);
+#else
+					addClause(clause);
+#endif
+					++bypasses;
+				  }
+				// The i'th and j'th soft clause can be activated at once
+				else if( ( i != j ) && ( solvermodel[checklit>>1] == (checklit^1) ) )
+				  {
+					++part.softclauses[i]->s_simultan;
+
+					std::vector < unsigned int > clause( 2, 0 );
+					clause[0] = lit;
+					clause[1] = checklit^1;
+#ifndef NDEBUG
+					bool rst = addClause(clause); assert(rst);
+#else
+					addClause(clause);
+#endif
+					++bypasses;
+				  }
+			  }
+
+			if( part.mincontra > part.softclauses[i]->s_contra )
+			  { 
+				part.mincontra = part.softclauses[i]->s_contra; 
+			  }
+			if( part.maxsimultan < part.softclauses[i]->s_simultan )
+			  { part.maxsimultan = part.softclauses[i]->s_simultan; }
+		  }
+	  }
+
+	if( m_control->getVerbosity() > 1 )
+	  { 
+		std::cout << "c find overall " << bypasses << " bypasses and " << unsats << " unsats" << std::endl; 
+	  }
+	trivialAssignment();
+  }
+
+  // Set clause bypasses in sorter, given by found trivial cases in "findSorterBypasses()"
+  // Assumes that the triggervariables in "m_currentTriggerParts" are up to date
+  void Quantom::setSorterCSC( Quantom::ConstraintPart& part )
+  {
+	if( !m_setCSC )
+	  { return; }
+
+	// No of soft clauses in this part
+	unsigned int noofsoftclauses( part.size() );
+	unsigned int softclausessize( part.softclauses.size() );
+	unsigned int diff = noofsoftclauses - softclausessize;
+	
+	if ( part.maxsimultan > 0 )
+	  {
+		unsigned int var( part.currenttrigger[part.maxsimultan-1] );
+#ifndef NDEBUG
+		bool rst = addUnit( (var<<1)^1 ); assert( rst );
+#else
+		addUnit( (var<<1)^1 );
+#endif
+	  }
+
+	if ( part.mincontra < noofsoftclauses && part.mincontra > 0 )
+	  {
+		unsigned int var( part.currenttrigger[noofsoftclauses-part.mincontra-diff] );
+#ifndef NDEBUG
+		bool rst = addUnit( var<<1 ); assert( rst );
+#else
+		addUnit( var<<1 );
+#endif
+	  }
+
+	for( unsigned int i = 0; i != softclausessize; ++i )
+	  {
+		unsigned int varcontra = part.softclauses[i]->s_contra;
+		if( varcontra > 0 && varcontra < noofsoftclauses )
+		  {
+			unsigned int triggerlit( part.softclauses[i]->s_triggerlit );
+			unsigned int lit( part.currenttrigger[noofsoftclauses-varcontra-diff]<<1 );
+				
+			std::vector < unsigned int > clause( 2, 0 );
+			clause[0] = triggerlit;
+			clause[1] = lit;
+#ifndef NDEBUG
+			bool rst = addClause(clause); assert(rst);
+#else
+			addClause(clause);
+#endif
+		  }
+
+	  }
+  }
+
+  // Adds last assignment of soft triggers to "assumptions"
+  void Quantom::setSoftTrigger( std::vector< unsigned int >& assumptions, Quantom::ConstraintPart& part )
+  {
+	if( !m_setTrigger )
+	  { return; }
+
+	// Deactive current trigger
+	for( unsigned int i = 0; i != part.softclauses.size(); ++i )
+	  {	part.softclauses[i]->s_lastAssignment = -1; }
+
+	// Add last assignment of soft triggers to assumptions
+	for( unsigned int i = 0; i != m_softclauses.size(); ++i )
+	  {
+		// If there is no last assignemt, deactive soft clause
+		if( m_softclauses[i].s_lastAssignment == 0 )
+		  { assumptions.push_back( m_softclauses[i].s_triggerlit ); }
+		// Otherwise set assumption according to last assignment
+		else if( m_softclauses[i].s_lastAssignment > 0 )
+		  { assumptions.push_back( (unsigned int)m_softclauses[i].s_lastAssignment ); }
+	  }
+  }
+
+  void Quantom::calcSplitWidth( void )
+  {
+	unsigned int splitwidth = m_softclauses.size();
+
+	if( m_maxWidth != 0 )
+	  {
+		// First get largest power of 2 number below "m_maxWidth"
+		unsigned int factor( 1 );
+		while ( ( factor * m_maxWidth ) < splitwidth )
+		  { factor <<= 1; }
+
+		// If there is any left over split into "(largest power of 2 number) - 1 + rest" parts
+		m_splittedWidth = splitwidth/factor;
+
+		if( (splitwidth%factor) != 0 )
+		  { ++m_splittedWidth; }
+	  }
+  }
+
+  unsigned int Quantom::solveBlackMagic (std::vector<unsigned int>& assumptions) 
+  {
+	std::vector< unsigned int > assum = assumptions;
+	
+	unsigned int bm = m_blackmagic;
+
+	// disable mode for solving
+	m_blackmagic = 0;
+
+	unsigned int result = QUANTOM_UNKNOWN;
+
+	for( unsigned int i = 0; i != bm; ++i )
+	  {
+		assert( m_cores[i] != NULL );
+
+		if( !quantom_configs[i]->c_active )
+		  { continue; }
+		loadConfiguration( i );
+
+		++quantom_configs.configurations[i]->c_solvercalls;		
+		unsigned int res = m_cores[i]->solve( assum );
+		quantom_configs.configurations[i]->c_runtime += m_cores[i]->getRuntime();
+		
+		assert( ( result == QUANTOM_UNKNOWN ) || ( res == QUANTOM_UNKNOWN ) || result == res );
+
+		if( res != QUANTOM_UNKNOWN )
+		  { 
+			result = res; 
+			++quantom_configs.configurations[i]->c_results;		
+		  }
+
+	  }
+	m_blackmagic = bm;
+	return result;
+  }
+
+  unsigned int Quantom::MaximizeBlackMagic ( int& opt, std::vector< unsigned int >& assumption ) 
+  {
+	std::vector< unsigned int > assum = assumption;
+
+	unsigned int bm = m_blackmagic;
+	// disable mode for solving
+	m_blackmagic = 0;
+
+	unsigned int result = QUANTOM_UNKNOWN;
+	int tmpopt = opt;
+	int optres = -1;
+	for( unsigned int i = 0; i != bm; ++i )	
+	  {
+		assert( m_cores[i] != NULL );
+		if( !quantom_configs[i]->c_active )
+		  { continue; }
+		loadConfiguration( i );
+
+		++quantom_configs.configurations[i]->c_solvercalls;		
+		unsigned int res = maxSolve ( tmpopt, assum, quantom_configs.configurations[i]->c_maxMode, i );
+
+		if( !(( optres == -1 ) || ( res == QUANTOM_UNKNOWN ) || optres == tmpopt ))
+		  { exit(0); }
+		assert( ( result == QUANTOM_UNKNOWN ) || ( res == QUANTOM_UNKNOWN ) || result == res );
+
+		// Store result for consistency checks
+		if( res != QUANTOM_UNKNOWN )
+		  { 
+			result = res; 
+			optres = tmpopt;
+			++quantom_configs.configurations[i]->c_maxresults;		
+		  }
+		tmpopt = opt;
+		assum = assumption;
+	  }
+	return result;
+  }
+
+  configure Quantom::getBestConfiguration( void )
+  {
+	unsigned int bestid = quantom_configs.size();
+	unsigned int bestsolved = 0;
+	double besttime = -1;
+	for( unsigned int i = 0; i != quantom_configs.size(); ++i )
+	  {
+		if( !quantom_configs[i]->c_active )
+		  { continue; }
+
+		if( quantom_configs[i]->c_results > bestsolved )
+		  { bestid = i; }
+		else if( besttime < 0 || quantom_configs[i]->c_runtime > besttime )
+		  { bestid = i; }
+	  }
+	assert( bestid < quantom_configs.size() );
+	return *quantom_configs[bestid];
+  } 
+
+  void Quantom::setVerbosity( unsigned int val )
+  { m_control->setVerbosity(val); }
+
+  
+  //debugging
+  void Quantom::printdatabase (unsigned int id) const { assert(id < m_cores.size() ); return m_cores[id]->printdatabase(); }
+
+  void Quantom::dumpCNF( std::ostream& os, unsigned int id ) const { assert(id < m_cores.size() ); m_cores[id]->dumpCNF(os); }
+}

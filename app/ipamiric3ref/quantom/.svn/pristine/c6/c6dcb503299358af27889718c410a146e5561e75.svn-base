@@ -1,0 +1,553 @@
+#include "core.hpp"
+
+namespace quantom {
+
+  // we need a special deduction routine for UPLA
+  // return "false" if a conflict occurs, otherwise "true"
+  bool Core::deduceUPLA( std::vector<std::vector< unsigned int > >& uplaWatches, const std::vector< unsigned int* >& uplaDatabase )
+  {
+	while( m_dsImplIndex != m_dsEndIndex )
+	  {
+		unsigned int wlit(m_decisionStack[m_dsImplIndex++]^1);
+
+#ifdef PREDEBUG
+		std::cout << "wlit: " << getLit(wlit) << std::endl;
+#endif
+		
+		// "wlit" has to be assigned, since it's part of the decision stack.
+		assert(m_assignment[Lit(wlit)] || m_assignment[Lit(wlit) ^ 1]); 
+
+		// Initialization.
+		const std::vector<unsigned int>& binWatches(m_binWatches[Lit(wlit)]); 
+		unsigned int binSize((unsigned int)binWatches.size()); 
+
+		// Process all binary clauses in which "wlit" occurs.
+		for (unsigned int b = 0; b < binSize; ++b)
+		  {
+		    // Do we have a conflict?
+			if (m_assignment[Lit(binWatches[b]) ^ 1])
+			  { 
+#ifdef PREDEBUG
+				std::cout << "conflict bin clause: " << getLit(wlit) << " [" << assignedTo(wlit) << "] " << getLit(binWatches[b]) << " [" << assignedTo(binWatches[b]) << "]" << std::endl;
+#endif
+				return false; 
+			  }
+
+			// Do we have an implication?
+			if (!m_assignment[Lit(binWatches[b])])
+			  { 
+			    addImplicationUPLA(binWatches[b]); 
+			  }
+		  }
+
+		std::vector< unsigned int >& watches = uplaWatches[Lit(wlit)];
+	
+		unsigned int wsize((unsigned int)watches.size());
+		for(unsigned int w = 0; w != wsize; ++w )
+		  {
+			unsigned int* clause(uplaDatabase[watches[w]]);
+
+			if( m_assignment[Lit(clause[0])] || m_assignment[Lit(clause[1])] )
+			  { continue;}
+
+			if( Lit(clause[1]) == Lit(wlit) )
+			  {	std::swap(clause[0], clause[1]); }
+
+			assert( Lit(clause[0]) == Lit(wlit) );
+
+			unsigned int pos(2);
+			
+			while( m_assignment[ Lit(clause[pos])^1 ] ) 
+			  { ++pos; }
+
+			// watchliteral found 
+			if( clause[pos] != 0 )
+			  {
+				//update watchlists
+				uplaWatches[Lit(clause[pos])].push_back(watches[w]);
+
+				watches[w] = watches[--wsize];
+				watches.pop_back();
+				--w;
+
+				std::swap( clause[0], clause[pos] );
+			  }
+			else
+			  {
+				if( m_assignment[ Lit(clause[1])^1 ] )
+				  { 
+#ifdef PREDEBUG
+					std::cout << "conflict clause: ";
+					printClause(clause);
+					std::cout << std::endl;
+#endif
+					return false; 
+				  }
+				else
+				  { 
+				    addImplicationUPLA(clause[1]); 
+				  }
+			  }
+		  }
+	  }
+	/*TODO: add pure literal detection*/
+	return true;
+  }
+
+  // Backtracks to decision literal "declit". 
+  void Core::backtrackUPLA (unsigned int declit)
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " lit: " << getLit(declit) << std::endl;
+#endif
+
+	// Initialization.
+	unsigned int lit(m_decisionStack[--m_dsEndIndex]);
+	
+	// Undo all variable assignments on decision levels higher than "bL".
+	// This loop assumes that we have a dummy assignment at the first 
+	// position of the decision stack, which has been assigned on decision level 0. 
+	while( lit != declit )
+	  {
+
+#ifdef PREDEBUG
+		std::cout << "redo assignment: " << getLit(lit) << std::endl;
+#endif
+		// Undo the current assignment.
+		m_assignment[Lit(lit)] = false;
+		  
+		// Get the next assignment to be undone.
+		lit = m_decisionStack[--m_dsEndIndex];
+	  } 
+
+	// Undo the current assignment.
+	m_assignment[Lit(lit)] = false;
+  
+	// Update "m_dsImplIndex".
+	m_dsImplIndex = m_dsEndIndex;
+	return;
+  } 
+
+  // Adds a decision to the decision stack.
+  void Core::addDecisionUPLA (unsigned int lit)
+  {    
+#ifdef PREDEBUG
+	std::cout << "decision: " << getLit(lit) << " on dL " << (m_decisionLevel+1) 
+			  << " q_level: " << q_level[Lit(lit)>>1] << " m_dsEndIndex: " << (m_dsEndIndex+1);
+	std::cout << std::endl;
+#endif
+
+	// The variable corresponding to "lit" has to be undefined.
+	assert(!m_assignment[Lit(lit)] && !m_assignment[Lit(lit) ^ 1]); 
+	assert( lit > 1 );
+
+	// Update "m_assignment".
+	m_assignment[Lit(lit)] = true;
+    
+	// Push "lit" onto the decision stack.    
+	m_decisionStack[m_dsEndIndex++] = lit; 
+  }
+
+  // Adds an implication forced by a non-binary clause to the decision stack.
+  void Core::addImplicationUPLA (unsigned int lit)
+  {     
+#ifdef PREDEBUG
+	std::cout << "imply " << getLit(lit) << " m_dsEndIndex: " << (m_dsEndIndex+1) << std::endl;
+#endif
+
+	// The variable corresponding to "lit" has to be undefined.
+	assert( ( !m_assignment[Lit(lit)] && !m_assignment[Lit(lit) ^ 1]) ); 
+	assert( lit > 1 );
+
+	// Update "m_assignment".
+	m_assignment[Lit(lit)] = true;
+
+	// Push "lit" onto the decision stack.    
+	m_decisionStack[m_dsEndIndex++] = lit; 
+  }
+
+  // Performs "Unit Propagation Lookahead". 
+  // Returns FALSE if the formula is unsatisfiable, otherwise TRUE will be returned.
+  bool Core::upla ( unsigned int& didsomething )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	printdatabase();
+#endif
+
+	// Clear watches.
+	for( unsigned int v = 1; v <= m_variables; ++v)
+	  {
+		if( !q_deleted[v] && !m_assignment[v<<1] && !m_assignment[(v<<1)^1] && q_level[v] != 0 )
+		  { 
+			m_clausesBinary += m_binWatches[v<<1].size() + m_binWatches[(v<<1)^1].size();
+		  }
+	  }
+	m_clausesBinary >>=1;
+	
+	// Skip if there are to many clauses in the database
+	if( ( m_clausesBinary + m_clauseDatabase.size() ) > 200000 )
+	  { return true; }
+
+	// Initialization.
+	std::vector<unsigned int> posimplications;
+	std::vector<unsigned int> negimplications; 
+	std::vector<unsigned int> remtmp;
+	std::vector<bool> nextcandidates(m_variables+1,false);
+
+	std::vector<std::vector< unsigned int > > uplaWatches( ( (m_variables << 1) + 2) );
+	std::vector< unsigned int* > uplaDatabase( m_clauseDatabase.size() );
+
+	unsigned int constants(q_uplacons);
+	unsigned int equivs(q_uplaequiv);
+
+	// copy new database
+	// don't need to copy binclauses...
+#ifdef PREDEBUG
+	std::cout << "copy database" << std::endl;
+#endif
+	unsigned int dbsize = (unsigned int)m_clauseDatabase.size();
+	for( unsigned int i = 0; i != dbsize; ++i )
+	  {
+		unsigned int* clause = m_clauseDatabase[i]->clause();
+		unsigned int* uplaclause(new unsigned int[m_clauseDatabase[i]->size() + 1] );
+
+		assert( clause[m_clauseDatabase[i]->size()] == 0 );
+
+#ifdef PREDEBUG
+		std::cout << "copy clause: ";
+		printClause(clause);
+		std::cout << std::endl;
+#endif
+
+		unsigned int pos(0);
+		while( clause[pos] != 0 )
+		  { 
+			uplaclause[pos] = clause[pos];
+			++pos;
+		  }
+
+		// set end marker
+		uplaclause[pos] = 0;
+
+		// if we obtain a unit clause, we have a problem
+		assert( pos > 1 );
+
+		uplaDatabase[i] = uplaclause;
+		uplaWatches[ Lit(uplaclause[0]) ].push_back( i );
+		uplaWatches[ Lit(uplaclause[1]) ].push_back( i );
+	  }
+
+	bool bcpres1(true);
+	bool bcpres2(true);
+
+	std::vector< unsigned int > uplaactivity( m_variables+1, 0 );
+	VarHeap<unsigned int> uplaheap(uplaactivity, m_variables);
+
+	// go through list by qlevel order...
+	for(unsigned int q = 1; q <= m_variables; ++q )
+	  {
+		if( q_deleted[q] || q_level[q] == 0 )
+		  { continue; }
+
+		//candidates.push_back( getUniFlag(q<<1) ); 
+		uplaactivity[q] = m_binWatches[q<<1].size() + m_binWatches[(q<<1)^1].size() + q_occur[q<<1].size() + q_occur[(q<<1)^1].size();
+#ifdef PREDEBUG
+		std::cout << "upla candidate: " << q << " activity: " << uplaactivity[q] << std::endl;
+#endif
+		if( uplaactivity[q] != 0 )
+		  { uplaheap.insert(q); }
+	  } 
+
+	unsigned int tmpimplindex = m_dsImplIndex;
+#ifdef PREDEBUG
+	std::cout << "tmp impl index: " << tmpimplindex << std::endl;
+#endif
+      
+	// Perform UPLA as long as mandatory implications can be found. 
+	while( !uplaheap.empty() )
+	  {
+		// Check all unassigned variables.
+		//unsigned int csize = (unsigned int)candidates.size();
+		unsigned int tmppos = m_dsEndIndex-1;
+
+#ifdef PREDEBUG
+		std::cout << "tmppos: " << tmppos << std::endl;
+#endif
+
+		//for (unsigned int v = 0; v != csize; ++v)
+		while( !uplaheap.empty() )
+		  {
+			// Initialization.
+			unsigned int lit = getUniFlag(uplaheap.top()<<1);
+
+#ifdef PREDEBUG
+			std::cout << "check: " << getLit(lit) << " [" << assignedTo(lit) << "] " << isUniversal(lit) << " activity: " << uplaactivity[Lit(lit)>>1] << std::endl;
+#endif
+
+			nextcandidates[Lit(lit)>>1] = false;
+			posimplications.clear();
+			negimplications.clear();
+
+			unsigned int pos(0);
+
+			// Current variable still unassigned?
+			if (m_assignment[Lit(lit)] || m_assignment[Lit(lit) ^ 1])
+			  { continue; }
+
+			// Add "lit" as a decision to the decision stack.
+			addDecisionUPLA( lit^1 );
+		  
+			// Initialization.
+			pos = m_dsEndIndex;
+
+			// What about the effects of this decision?	
+			bcpres1 = deduceUPLA(uplaWatches,uplaDatabase);
+
+			// Unsatisfied part of universal literal? Problem UNSAT!
+			if( !bcpres1 && isUniversal(lit) )
+			  { 
+#ifdef PREDEBUG
+			    std::cout << "conflict with universal in UPLA" << std::endl;
+#endif
+				for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+				  { delete[] uplaDatabase[i]; }
+				return false; 
+			  }
+
+#ifdef PREDEBUG
+			std::cout << "collect implications for " << getLit(lit^1) << std::endl;
+#endif
+			// store all implications, triggered by decision of "lit"
+			for(unsigned int i = pos; i < m_dsEndIndex; ++i)
+			  { 
+#ifdef PREDEBUG
+				std::cout << getLit( m_decisionStack[i] ) << " ";
+#endif
+				negimplications.push_back( m_decisionStack[i] ); 
+			  }
+#ifdef PREDEBUG
+			std::cout << std::endl;	
+#endif
+				
+			// Backtrack.
+			backtrackUPLA(lit^1);
+
+			// If there are no conflict and no implications for "lit^1", we don't have to consider "lit"
+			if( bcpres1 && negimplications.empty() )
+			  { continue;}
+
+			// Add "lit^1" as a decision to the decision stack.
+			addDecisionUPLA( lit );
+
+			// What about the effects of this decision?		  
+			bcpres2 = deduceUPLA(uplaWatches, uplaDatabase);
+
+			// Unsatisfied part of universal literal? Problem UNSAT!
+			if( !bcpres2 && isUniversal(lit) )
+			  { 
+#ifdef PREDEBUG
+			    std::cout << "conflict with universal in UPLA" << std::endl;
+#endif
+				for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+				  { delete[] uplaDatabase[i]; }
+				return false; 
+			  }
+
+#ifdef PREDEBUG
+			std::cout << "collect implications for " << getLit(lit) << std::endl;
+#endif
+			// store all implications, triggered by decision of "lit"
+			for(unsigned int i = pos; i < m_dsEndIndex; ++i)
+			  { 
+#ifdef PREDEBUG
+			    std::cout << getLit( m_decisionStack[i] ) << " ";
+#endif
+			    posimplications.push_back( m_decisionStack[i] ); 
+			  }
+#ifdef PREDEBUG
+			std::cout << std::endl;	
+#endif
+
+			// Backtrack.
+			backtrackUPLA(lit);
+
+			if( !bcpres1 && !bcpres2 )
+			  { 
+#ifdef PREDEBUG
+			    std::cout << "both UPLA decisions leads to conflict" << std::endl;
+#endif
+			    for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+			      { delete[] uplaDatabase[i]; }
+			    return false; 
+			  }
+
+#ifdef PREDEBUG
+			std::cout << "bcpres1: " << bcpres1 << " bcpres2: " << bcpres2 << std::endl;
+#endif
+			if( bcpres1 && !bcpres2 )
+			  { 	
+#ifdef PREDEBUG
+			    std::cout << "UPLA: imply " << getLit(lit^1) << std::endl;
+#endif
+			    addImplication( lit^1, NULL );
+			    deduceUPLA(uplaWatches, uplaDatabase);
+			    didsomething |= 0x4;
+				++q_uplacons;
+			  }
+			else if( !bcpres1 && bcpres2 )
+			  { 
+#ifdef PREDEBUG
+			    std::cout << "UPLA: imply " << getLit(lit) << std::endl;
+#endif
+			    addImplication( lit, NULL );
+			    deduceUPLA(uplaWatches, uplaDatabase);
+			    didsomething |= 0x4;
+				++q_uplacons;
+			  }
+			else
+			  {
+			    for( unsigned int i = 0; i != posimplications.size(); ++i )
+			      {
+					const unsigned int& posimpl = posimplications[i];
+
+					if( m_assignment[Lit(posimpl)] || m_assignment[Lit(posimpl)^1] || m_donttouch[Lit(posimpl)>>1] ) 
+					  { continue; }
+
+					for( unsigned int j = 0; j != negimplications.size(); ++j )
+					  {
+						const unsigned int& negimpl = negimplications[j];
+
+						if( posimpl == negimpl )
+						  {
+							didsomething |= 0x4;
+#ifdef PREDEBUG
+							std::cout << "UPLA: constant " <<  getLit( posimpl ) << std::endl;
+#endif
+					
+							if( m_assignment[Lit(posimpl)^1] || isUniversal(posimpl) )
+							  { 
+#ifdef PREDEBUG
+								std::cout << "Universal constant or assignment in both polarities -> UNSAT" << std::endl;
+#endif
+								for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+								  { delete[] uplaDatabase[i]; }
+								return false; 
+							  }
+							addImplication( posimpl, NULL );
+							++q_uplacons;
+							break;
+						  }
+						else if( posimpl == (negimpl^1) )
+						  {
+							didsomething |= 0x4;
+
+#ifdef PREDEBUG
+							std::cout << "UPLA: equivalence " << getLit(lit) << " " << getLit( posimpl ) << std::endl;
+#endif
+
+							unsigned int secondlit(posimpl);
+							if( q_level[Lit(lit)>>1] > q_level[Lit(secondlit)>>1] )
+							  { secondlit = lit; }
+
+							// if variable on deeper level is universal -> UNSAT
+							if( isUniversal(secondlit) )
+							  { 
+								for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+								  { delete[] uplaDatabase[i]; }
+								return false; 
+							  }
+
+							if( isUniversal(lit) && isUniversal(posimpl) )
+							  {
+#ifdef PREDEBUG
+								std::cout << "equivalance of two universal lits" << std::endl;
+#endif
+								for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+								  { delete[] uplaDatabase[i]; }
+								return false;
+							  }
+
+							bool learned1( false );
+							bool learned2( false );
+							bool firstbin = addBinary(lit,negimpl, learned1);
+							bool secondbin = addBinary(lit^1,posimpl, learned2);
+
+							if ( firstbin || secondbin )
+							  { ++q_uplaequiv; }
+						  
+							break;
+						  }
+					  }
+			      }
+			    deduceUPLA(uplaWatches, uplaDatabase);
+			  }
+			posimplications.clear();
+			negimplications.clear();
+		  }
+
+		// reached timeout?
+		double timeC(0.0);
+		struct rusage resources;
+		getrusage(RUSAGE_SELF, &resources);
+		timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;	
+		if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+		  { 
+			return true;
+		  }			
+
+#ifdef PREDEBUG
+		std::cout << "collect next candidates" << std::endl;
+#endif
+		
+		// Proceed occurence list of assigned literals for next upla round
+		for( unsigned int j = tmppos+1; j != m_dsEndIndex; ++j )
+		  {
+			std::vector< pointToClause* > occur = q_occur[ Lit(m_decisionStack[j])^1 ];
+			unsigned int osize = (unsigned int)occur.size();
+#ifdef PREDEBUG
+			std::cout << "lit: " << getLit(m_decisionStack[j]^1) << std::endl;
+#endif
+
+			for( unsigned int c = 0; c != osize; ++c )
+			  {
+				unsigned int opos(0);
+	
+#ifdef PREDEBUG			
+				std::cout << "clause" << std::endl;
+				printClause(occur[c]->clause());
+				std::cout << std::endl;
+#endif
+
+				while( occur[c]->clause()[opos] != 0 )
+				  {
+					unsigned int clit = occur[c]->clause()[opos];
+					if( !nextcandidates[ Lit(clit)>>1 ] && !m_assignment[Lit(clit)] && !m_assignment[Lit(clit)^1] )
+					  {
+#ifdef PREDEBUG
+					    std::cout << "upla candidate for next round: " << getLit(clit) << std::endl;
+#endif
+						//candidates.push_back( clit );
+						uplaheap.insert(Lit(clit)>>1);
+						nextcandidates[Lit(clit)>>1] = true;
+					  }
+					++opos;
+				  }
+			  }
+		  }
+	  }
+	
+	for( unsigned int i = 0; i != uplaDatabase.size(); ++i )
+	  { delete[] uplaDatabase[i]; }
+
+	// Set Implication Pointer for next Simplification
+	m_dsImplIndex = tmpimplindex;
+
+	if( m_control->getVerbosity() > 1 )
+	  {	
+		std::cout << "c upla constants: " << (q_uplacons - constants) << std::endl;
+		std::cout << "c upla equivalences: " << (q_uplaequiv - equivs) << std::endl;
+	  }
+	return propagateUnits();      
+  }
+}

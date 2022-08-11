@@ -1,0 +1,6064 @@
+#ifndef CORE_HPP
+#define CORE_HPP
+
+/********************************************************************************************
+core.hpp -- Copyright (c) 2014, Tobias Schubert, Sven Reimer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, merge, 
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons 
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+********************************************************************************************/
+
+// Include standard headers.
+#include <sys/resource.h>
+#include <algorithm>
+#include <iostream>
+#include <cassert>
+#include <vector>
+#include <set>
+#include <map>
+
+// Include quantom related headers.
+#include "quantom.hpp"
+#include "varheap.hpp"
+#include "clause.hpp"
+#include "control.hpp"
+
+//#define OUTPUT
+//#define STATS
+
+#ifdef STATS 
+#include <math.h>
+#endif
+
+//#define DEBUG
+//#define PREDEBUG
+//#define ANADEBUG
+//#define SOLDEBUG
+
+#ifdef DEBUG
+//#define EXDEBUG
+//#define PREDEBUG
+//#define ANADEBUG
+//#define SOLDEBUG
+#endif
+
+#ifdef COMBSOLVER
+#define EXNUMB 3
+#include <sstream>
+#include <fstream>
+
+#include <lrabsutil/String.hh>
+#include <aigqbf/config.hh>
+#include <aigqbf/ExitCodes.hh>
+#include <aigqbf/Instance.hh>
+#include <aigqbf/PreprocessorOptions.hh>
+#include <aigqbf/StructuredSolver_AIG.hh>
+#include <aigqbf/Solution2.hh>
+
+#define EXPORTDEBUG
+
+#endif
+
+
+
+template<typename T1, typename T2>
+bool sortPairBySecond( const std::pair<T1, T2>& i, const std::pair<T1, T2>& j ) 
+{
+  if( i.second != j.second )
+    { return ( i.second < j.second ); }
+  else
+    { return ( i.first < j.first ); }
+}
+
+template<typename T1, typename T2>
+bool sortPairBySecondReverse( const std::pair<T1, T2>& i, const std::pair<T1, T2>& j ) 
+{
+  if( i.second != j.second )
+    { return ( i.second > j.second ); }
+  else
+    { return ( i.first > j.first ); }
+}
+
+namespace quantom
+{
+
+#ifdef COMBSOLVER
+  /* needed for export to aigsolve 
+	 collect all learned clauses from aigsolve */
+  struct Implications
+  {
+	std::vector< std::pair<unsigned int, unsigned int > > units;
+	std::map< unsigned int, unsigned int > binimpl;
+	std::map< unsigned int, pointToClause* > naryimpl;
+	std::vector< unsigned int > pseudoimpl;
+	int backtracklevel;
+	bool unitclause;
+	
+	Implications(unsigned int level) :
+	  units(),
+	  binimpl(),
+	  naryimpl(),
+	  pseudoimpl(),
+	  backtracklevel(level),
+	  unitclause(false)
+	{}
+  };
+#endif
+  
+  // removes universal bit flag from "lit"
+  inline unsigned int Lit ( unsigned int lit ) { return (lit&AUNIFLAG); }
+
+  // The "Core" class.
+  class Core
+  {
+
+  public:
+
+    // Constructor.
+    Core (Control* control = NULL) : 
+	  m_control(control),
+      m_emptyClause(false),
+	  m_result(QUANTOM_UNKNOWN),
+	  m_runtime(0.0),
+      m_variables(0),
+	  m_maxorgvar(0),
+      m_decisions(0),
+      m_bcps(0),
+      m_conflicts(0),
+      m_restarts(0),
+	  m_restartAttempts(0),
+	  m_currentRestarts(0),
+      m_simplifications(0),
+      q_simplifications(0),
+	  m_lastSimplifyCount(1),
+	  q_slbd(1),
+      m_assignment(),
+	  m_polarity(),
+	  m_weight(),
+      m_cache(),
+	  m_agility(0.9999),
+	  m_useAgility(false),
+	  m_agilityThreashold(0.25),
+	  m_level(),
+      m_activity(),
+	  m_activity2(),
+	  m_activity3(),
+      m_forcing(),
+      m_binForcing(),
+      m_watches(),
+	  m_learnedWatches(),
+	  q_cubeWatches(),
+      m_binWatches(),
+	//m_binWatchesLearned(),
+	  m_binWatchesLearnedIndex(),
+      m_incVarActivity(1.0),
+	  m_varActMultiplier(1.05),
+      m_decisionLevel(0),
+      m_rootLevel(0),
+      m_decisionStack(),
+      m_dsEndIndex(1),
+      m_dsImplIndex(1),
+	  q_dsPropIndex(1),
+      m_newDecision(false),
+      m_binConflict(),
+	  m_lubyShift(12),
+	  m_nxtRestarti(1024), //default: 1024
+	  m_nxtRestarto(32), //default: 32
+	  m_innercounter(0),
+	  m_outercounter(0),
+	  m_nxtRestart( (1<<m_lubyShift) ), //antom: 256 quantom: 4096
+	  m_ccs(1),
+	  m_decVarSign(false),
+	  m_switchVarSign(true),
+	  m_model(),
+	  m_conflictClause(),
+	  q_solutioncube(),
+	  m_clauseDatabase(),
+	  q_solutionDatabase(),
+	  m_openIDs(),
+	  m_candidates(),
+	  q_multiplexed(false),
+	  m_literals(0),
+	  m_clauses(0),
+	  m_clausesBinary(0),
+	  m_clausesStatic(0),
+	  m_clausesStaticBinary(0),
+	  m_clausesDynamic(0),
+	  m_clausesDynamicBinary(0),
+	  m_cubes(0),
+	  m_clauselength(0),
+	  m_clauseIDs(0),
+	  m_avgGlobalDL(0.0),
+	  m_avgLocalDL(0.0),
+	  m_avgGlobalBTlevel(0),
+	  m_avgLocalBTlevel(0),
+	  q_solutions(0),
+	  q_purelits(0),
+	  q_dontcare(0),
+	  m_bcpstats(15,0),
+	  m_forward(true),
+	  q_reason(),
+	  q_decision(0),
+	  q_maxqlevel(0),
+	  q_minqlevel(2),
+	  q_maxradix(),
+	  q_cachedImplIndex(0),
+	  q_varOrder(), 
+	  q_varOrder2(), //used for alternative decision procedure
+	  m_tlbd(0),
+	  m_ttlbd(0),
+	  q_skiplearning(false),
+	  q_togglelearning(true),
+	  m_ip(2),
+	  m_decHeu(3),
+	  m_restartHeu(1),
+	  m_resetHeu(false),
+	  m_cacheswap(true),
+	  m_lhbr(false),
+	  q_mincube(true),
+	  q_subsumption(false),
+	  q_nextsubsumption(false),
+	  q_upla(false),
+	  q_varelim(false),
+	  q_quantmerge(false),
+	  m_recalcDecHeu(0),
+	  m_lhbrclauses(0),
+	  q_solutionorder(1),
+	  q_soltype(0),
+	  q_level(),
+	  q_occur(),
+	  m_donttouch(),
+	  q_deleted(),
+	  q_replaces(),
+	  q_litbylevel(),
+	  q_assumptions(),
+	  q_solve(true),
+	  q_prepro(false),
+	  q_inpro(false),
+	  q_newunit(false),
+	  q_refreshVarorder(false),
+	  q_elimclauses(0),
+	  q_inprocessings(0),
+	  q_subsumptions(0),
+	  q_selfsubsumptions(0),
+	  q_monolits(0),
+	  q_dclits(0),
+	  q_cons(0),
+	  q_equiv(0),
+	  q_uplacons(0),
+	  q_uplaequiv(0),
+	  q_reslits(0),
+	  q_mergedLevels(0),
+	  q_deletedLevels(0),
+	  q_unitprop(0),
+	  q_liftingmode(0),
+	  q_backtracklevel(0),
+	  q_unitcubes(),
+	  m_verbosity(0)
+#ifdef COMBSOLVER
+	  ,
+	  e_orgclauses(0),
+	  e_counter(0),
+	  e_lastcount(0),
+	  e_toggleexport(true),
+	  e_togglerestart(false),
+	  e_nowexport(false),
+	  e_switching(-1),
+	  e_startswitching(-1),
+	  e_switchcount(0),
+	  e_nxtexport(1<<EXNUMB),
+ 	  e_aigsat(0),
+	  e_aigunsat(0),
+	  e_learnedaigclause(0),
+	  e_aigtimeout(2),
+	  e_aigsollevel(-1),
+	  e_starttime(lrabs::cpuTime())
+#endif
+	{
+      // Consistency check.
+      assert(m_control != NULL); 
+
+      // Initialize "m_binConflict".
+      m_binConflict[0] = 0;
+      m_binConflict[1] = 0;
+#ifdef DEBUG
+	  std::cout << "DEBUG MODE" << std::endl;
+#ifdef EXDEBUG
+	  std::cout << "EXTENDED DEBUG MODE" << std::endl;
+#endif
+#endif
+    }
+
+    // Destructor.
+    ~Core (void)
+    {
+      // Initialization.
+      unsigned int size((unsigned int)m_clauseDatabase.size());
+
+      // Delete the clause database.
+      for (unsigned int c = 0; c < size; ++c)
+		{ 
+		  delete m_clauseDatabase[c]; 
+		}
+
+	  size = (unsigned int)q_solutionDatabase.size();
+
+	  for (unsigned int s = 0; s < size; ++s)
+		{ 
+		  delete q_solutionDatabase[s]; 
+		}
+	  
+	  size = (unsigned int)q_varOrder.size();
+	  assert(size == q_varOrder2.size());
+	  for (unsigned int i = 0; i < size; ++i)
+		{ 
+		  if( q_varOrder[i] != NULL ) delete q_varOrder[i]; 
+		  if( q_varOrder2[i] != NULL ) delete q_varOrder2[i];
+		}
+
+    }
+ 
+    // Returns the number of decisions made so far.
+    unsigned int decisions (void) const { return m_decisions; }
+
+    // Returns the number of BCP operations performed so far.
+    unsigned int bcps (void) const { return m_bcps; }
+
+    // Returns the number of conflicts encountered so far.
+    unsigned int conflicts (void) const { return m_conflicts; }
+
+	// Returns the number of solutions encountered so far.
+    unsigned int solutions (void) const { return q_solutions; }
+
+	// Returns the number of pure literals detected so far.
+    unsigned int purelits (void) const { return q_purelits; }
+
+	// Returns the number of don't care literals detected so far.
+    unsigned int dontcare (void) const { return q_dontcare; }
+
+    // Returns the number of restarts performed so far.
+    unsigned int restarts (void) const { return m_restarts; }
+
+    // Returns the number of restart attempts performed so far.
+    unsigned int restartAttempts (void) const { return m_restartAttempts; }
+
+    // The number of database simplifications performed so far.
+    unsigned int clauseSimplifications (void) const { return m_simplifications; }
+    unsigned int cubeSimplifications (void) const { return q_simplifications; }
+
+	unsigned int clauses (void) const { return m_clauses; }
+
+	unsigned int learnedclauses (void) const { return (m_clausesDynamic); }
+	
+	unsigned int remainingcubes (void) const { return (q_solutions - m_cubes); }
+
+	unsigned int literals (void) const { return m_literals; }
+
+	unsigned int lhbrclauses (void) const { return m_lhbrclauses; }
+	
+	unsigned int remainingliterals (void) const { return (m_literals - m_lastSimplifyCount + 1); }
+
+    unsigned int resolvedVar (void) const { return q_reslits; }
+
+    unsigned int deletedLevels (void) const { return q_deletedLevels; }
+
+    unsigned int mergedLevels (void) const { return q_mergedLevels; }
+
+    unsigned int unitProp (void) const { return q_unitprop; }
+
+	unsigned int inprocessings (void ) const { return q_inprocessings; }
+
+	std::vector<unsigned int> bcpstat (void) const { return m_bcpstats; }
+
+    // Returns a pointer to the satisfying variable assignment (contains invalid data if the formula is unsatisfiable).
+    const std::vector<unsigned int>& model (void) const { return m_model; }
+
+	// Write trivial assignemnts ( assignemnts on decision level 0 ) into model
+	void trivialAssignment( void )
+	{ 
+      // Has to be executed on decision level 0.
+      assert(m_decisionLevel == 0);
+
+      // Clear "m_model".
+      for (unsigned int v = 1; v <= m_variables; ++v)
+		{ m_model[v] = 0; }
+
+      // Copy all assigned variables to "m_model".
+      for (unsigned int d = 1; d < m_dsEndIndex; ++d)
+		{ m_model[Lit(m_decisionStack[d]) >> 1] = Lit(m_decisionStack[d]); }
+	}
+
+	const std::vector< std::vector< unsigned int > >& getEquivalences ( void ) { return q_replaces; }
+
+    // Sets the time limit to "t" seconds. There will be no limit at all if "t" is less or equal 0.
+    void setCPULimit (double t) { m_control->setCPULimit(t); }
+
+	double getRuntime( void ) const { return m_runtime; }
+
+	// Sets the Luby shift to "luby" (default: 12).
+	void setLubyShift (unsigned int luby) 
+	{
+	  m_lubyShift = luby;
+	  m_nxtRestart = 1 << luby;
+	}
+
+	// Sets the inner and outer loop values for picosat restart modes 
+	// default: inner=1024, outer=32
+	void setPicoLoops ( unsigned int inner, unsigned int outer)
+	{
+	  m_nxtRestarti = inner;
+	  m_nxtRestarto = outer;
+	}
+
+	// Sets the "Initial Variable Activity" to "val" (default: 1).
+    void setIVA (unsigned int val) { m_incVarActivity = val; } 
+
+	// Sets the "Variable Activity Multiplier" to "mult" (default: 1.05).
+    void setActMultiplier (double mult) { m_varActMultiplier = mult; }
+
+    // Sets the "Initial Phase" mode to "val".
+    // 0: FALSE (default),
+    // 1: All flipped (Phase depends also of decision heuristic),
+	// 2: Universal flipped.
+	// 3: Random
+    void setIP (unsigned int val) { m_ip = val; }
+
+	// set sort mode for simplify
+	void setCCS ( unsigned int val ) { m_ccs = val; }
+
+	// Delete clauses/cubes with high lbd during "simplify"
+	void setSimplifyLBD ( unsigned int val ) { q_slbd = val; }
+
+	// Restricted Cube Learning
+	void setSkipLearning ( bool val ) { q_skiplearning = val; }
+
+   	// Switch cache value of variable assignment with restart
+	void setSwitchVarSign (bool val) { m_switchVarSign = val; }
+
+	// Sets the Decision Heuristic to "val" (default:0)
+	// 0: VSIDS
+	// 1: SLCS (static literal combination sum)
+	// 2: DLCS (dynamic literal combination sum)
+	// 3: DLCS with implication analysis (not implemented yet)
+	// 4: QuBE-Style (not implemented yet)
+	void setDecHeu (unsigned int val) { m_decHeu = val; }
+
+	// Sets "Restart Heuristic" to "val" (default:1).
+	// 0: no restarts
+	// 1: with luby-shift
+	// 2: picosat-style (inner and outer loops)
+	// 3: glucose-style (average decision level)
+
+	void setRestartHeu (unsigned int val) { m_restartHeu = val; }
+
+	// Reset heuristics during solving
+	void setResetHeu (bool val) { m_resetHeu = val; srand((unsigned int)time(0)); }
+
+	// Swap cached due to pos and neg occurence
+	void setCacheSwap (bool val) { m_cacheswap = val; }
+
+	// Use Lazy Hyper Binary Resolution?
+   	void setLHBR (bool val) { m_lhbr = val; }
+
+	// Minimize cubes?
+	void setMinCube (bool val) { q_mincube = val; }
+
+	// Subsumption check with every "simplify()"?
+	void setSubsumption (bool val) { q_subsumption = val; }
+
+	// Use Agility?
+	void setAgility (bool val) { m_useAgility = val; }
+
+	// perform UPLA?
+	void setUPLA (bool val) { q_upla = val; }
+
+	// perform variable elimination?
+	void setVarElim (bool val) { q_varelim = val; }
+
+	// perform quantifier merge?
+	void setQuantMerge (bool val) { q_quantmerge = val; }
+
+	unsigned int variables ( void ) const { return m_variables; }
+
+	// Should variable "var" be a "Don't Touch" variable?
+	void setDontTouch( unsigned int var, bool dt = true ) 
+	{ 
+	  assert( var <= m_variables ); 
+
+	  // Update Preprocessor Data structure if don't touch variables are declared
+	  if( m_donttouch.size() <= m_variables )
+		{ updateDataStructures(m_donttouch.size()); }
+
+	  m_donttouch[var] = dt; 
+	}
+
+	// Returns true, if "var" is a "Don't Toch" variable
+	bool isDontTouch( unsigned int var )
+	{ 
+	  assert ( var <= m_variables );
+	  if( m_donttouch.size() < m_variables )
+		{ return false; }
+	  return m_donttouch[var];
+	}
+
+	bool isDeleted( unsigned int var )
+	{
+	  assert ( var <= m_variables );
+	  return q_deleted[var];
+	}
+
+
+	// If "var" will be learnt as "unit", undo it further for incremental steps
+	//void markDeleteUnit( unsigned int var ) { assert( var <= m_variables ); q_keeplit[var] = true; }
+
+	unsigned int getQuantLevel( unsigned int var ) const { assert( var <= m_variables); return q_level[var]; }
+
+	// Set the heuristic for the order of the literals in a solution case
+	// 000: variable index
+	// 001: overall occurence (from lowest to highest)
+	// 010: pos/neg occurence (from lowest to highest)
+	// 011: cache last solution - prefer literals which are deleted last time
+	// 1xx: prefer quantlevel with least remaining literals
+	void setSolutionOrder( unsigned int val) { q_solutionorder = val; }
+
+	void setSolutionType( unsigned int val ) { q_soltype = val; }
+
+	void setMaxIndex (unsigned int max) { assert(max>m_variables); assert( (max<<1) < UNIFLAG ); updateDataStructures(max);}
+
+	// Set initial polarity to variable.
+	// Polarities overwrite every other initial setting
+	// "polarity"=true : set inital polarity to "true"
+	void setPolarity( unsigned int var, bool polarity )
+	{
+	  assert( var <= m_variables );
+	  m_polarity[var] = polarity?(var<<1):((var<<1)+1);
+	}
+
+	void setActivity( unsigned int var, double activity )
+	{
+	  assert( var <= m_variables );
+	  m_activity[var] = activity;
+	  m_activity2[var] = (unsigned int)activity;
+	  m_activity3[var] = (unsigned int)activity;
+#ifdef DEBUG
+	  std::cout << "set activity of " << var << " to " << activity << std::endl;
+#endif
+	}
+
+	// Returns the activity for each variable
+    std::vector<double> getActivity (void) const 
+	{ 
+	  std::vector< double > activities( m_variables+1, 0.0 );
+	  if( m_decHeu == 0 || m_decHeu == 3 )
+		{ 
+		  activities = m_activity;
+		}
+	  else if( m_decHeu == 1 )
+		{
+		  for( unsigned int i = 1; i <= m_variables; ++i )
+			{
+			  activities[i] = (double)m_activity2[i];
+			}
+		}
+		  
+	  return activities; 
+	}
+
+	void setNewQLevel( unsigned int var, unsigned int level ) 
+	{ 
+	  assert( var <= m_variables); q_level[var] = level; 
+	  if( var > q_varOrder[level-1]->variables() )
+		{
+		  q_varOrder[level-1]->resize(var);
+		  q_varOrder2[level-1]->resize(var);
+		}
+	}
+
+	unsigned int getMaxQLevel ( void ) const { return q_maxqlevel; }
+
+	void setClauseSort( bool val ) { m_forward = val; }
+
+	// Set initial weight to variable.
+	// double value >=0. The initial activity will be multiplied with this weight
+	void setWeight( unsigned int var, double weight )
+	{
+	  assert( var <= m_variables );
+	  m_weight[var] = weight;
+	}
+
+	// use Preprocessor?
+	void setPreprocessor( bool val ) { q_prepro = val; }
+
+	// use Inprocessor?
+	void setInprocessor( bool val ) { q_inpro = val; }
+
+	// solve instance?
+	// if not the partial model obtains so far is stored, accessed by "model()"
+	void setSolve( bool var ) { q_solve = var; }
+
+	// set lifting mode:
+	// 0: no lifting (default)
+	// 1: lifting with conflict clause
+	// 2: lifting with solution analysis
+	// 3: lifting with succesive assumption setting
+	// 4: combine 1+3
+	void setLiftingMode( unsigned int val ) { q_liftingmode = val; }
+
+	void setBacktracklevel( unsigned int val ) 
+	{ 
+#ifdef DEBUG
+	  std::cout << __func__ << " " << val << std::endl;
+#endif
+	  assert( q_liftingmode > 0 ); q_backtracklevel = val; 
+	}
+
+	void setVerbosity( unsigned int val ) { std::cout << __func__ << " " << val << std::endl; m_verbosity = val; }
+
+	// Undo unit cubes and all following implications on decision level 0
+	void undoCubesAndMaxUnits( void ) 
+	{
+
+	  assert( m_decisionLevel == 0 );
+
+	  // Delete all cubes
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  std::vector< pointToClause* >().swap(q_cubeWatches[v << 1]); 
+		  std::vector< pointToClause* >().swap(q_cubeWatches[(v << 1) ^ 1]); 
+		}
+
+	  while( !q_solutionDatabase.empty() )
+		{
+		  //std::cout << "delete cube: " << std::endl;
+		  //printClause(q_solutionDatabase.back());
+		  
+		  m_openIDs.push_back(q_solutionDatabase.back()->id());
+		  delete q_solutionDatabase.back();
+		  q_solutionDatabase.pop_back();
+		}	
+
+	  q_unitcubes.clear();
+
+#if 0
+	  unsigned int dindex = 1;
+
+	  while( !q_keeplit[ Lit( m_decisionStack[dindex] ) >> 1 ] && dindex < m_dsEndIndex )
+		{ ++dindex; }
+
+	  unsigned int newdsindex = dindex;
+
+	  unsigned int lit( m_decisionStack[dindex] );
+	  unsigned int index( Lit(lit)>>1 );
+	  
+	  while( dindex < m_dsEndIndex )
+		{
+		  assert( !isDC(lit) );
+		  assert( m_level[index] == 0 );
+
+#ifdef DEBUG
+		  std::cout << "undo assignment of: " << index << std::endl;
+#endif
+		  // Cache the variable's current truth value.
+		  m_cache[index] = lit & 1;
+
+		  // Add the current index to "q_varOrder".
+		  switch(m_decHeu)
+			{
+			case 0:
+			  if (!q_varOrder[q_level[index]-1]->inHeap(index))
+				{ q_varOrder[q_level[index]-1]->insert(index); }
+			  break;
+			case 1:
+			  if (!q_varOrder2[q_level[index]-1]->inHeap(index))
+				{ q_varOrder2[q_level[index]-1]->insert(index); }
+			  break;
+			case 3:
+			  if (!q_varOrder[q_level[index]-1]->inHeap(index))
+				{ q_varOrder[q_level[index]-1]->insert(index); }
+			default:
+			  break;
+			}
+
+		  // Undo the current assignment.
+		  m_assignment[Lit(lit)] = false;
+
+		  // Reset Level
+		  m_forcing[index] = NULL;
+		  m_binForcing[index] = 0;
+		  unsetReason(lit); 
+
+		  ++dindex;
+
+		  lit = m_decisionStack[dindex];
+		  index = Lit(lit)>>1;
+		}
+
+	  m_dsEndIndex = newdsindex;
+	  m_dsImplIndex = m_dsEndIndex;
+	  
+	  // Undo the keep flags for next incremental run
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{ q_keeplit[v] = false; }
+#endif
+	}
+
+	// get the last conflict clause derived by solver
+	std::vector< unsigned int > getLastConflict( void ) { return m_conflictClause; }
+
+
+	// calc clauses signature and returns it
+	unsigned long long calcSignature( const std::vector< unsigned int >& clause, const unsigned int& size )
+	{
+#ifdef PREDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  unsigned long long sign = 0;
+	  
+	  for( unsigned int i = 0; i != size; ++i )
+		{
+#ifdef PREDEBUG
+		  std::cout << getLit(clause[i]) << " ";
+#endif
+		  sign |= 1ULL << ( (clause[i]>>1) % 64);
+		}
+#ifdef PREDEBUG
+	  std::cout << std::endl << std::hex << "sign: " << sign << std::dec << std::endl;
+#endif
+	  return sign;
+	} 
+
+	bool addUnit( unsigned int lit )
+	{
+	  std::vector< unsigned int > clause;
+	  clause.push_back(lit);
+	  return addClause(clause);
+	}
+
+	unsigned int nextClauseID( void )
+	{ 
+	  if( m_openIDs.empty() )
+		{
+		  return m_clauseIDs++; 
+		}
+
+	  unsigned int id = m_openIDs.back();
+	  m_openIDs.pop_back();
+	  return id;
+	}
+
+    // Adds a clause to the clause database. Returns FALSE if the CNF formula is unsatisfiable,
+    // otherwise TRUE will be returned. Assumes that the solver is on decision level 0 and that 
+    // "clause" is not empty. Furthermore, all literals have to be encoded as follows, having 
+    // variable indices greater 0:
+    //  x3 <--> (3 << 1)     = 6
+    // -x3 <--> (3 << 1) + 1 = 7
+    // All clauses inserted into the clause database using "ad->clause()" are assumed to belong to the 
+    // original CNF formula (having a "Literals Blocks Distance" of 1). Note, that "clause" will be modified. 
+    bool addClause (std::vector<unsigned int>& clause, bool pre = false, bool lbd = 1)
+    {
+#ifdef DEBUG
+	  std::cout << __func__ << ": ";
+	  printClause(clause);
+	  std::cout << std::endl;
+#endif
+
+      // What about the empty clause?
+      if (m_emptyClause)
+		{ return false; }
+ 
+      // Are we really on decision level 0?
+      assert(m_decisionLevel == 0); 
+
+      // If "clause" is empty, we might have a problem.
+      assert(!clause.empty()); 
+
+      // Sort "clause" to speedup the checks below.
+	  std::sort(clause.begin(),clause.end());
+
+	  // Variable indices are assumed to be greater 0.
+	  assert(clause.front() > 1);
+
+	  // Do we have to update all data structures depending on the number of variables?
+	  assert( (Lit(clause.back()) >> 1) <= m_variables );
+	
+      // Initialization.
+      unsigned int stop((unsigned int)clause.size());
+      unsigned int lit(0);
+      unsigned int size(0); 
+      unsigned int maxeqlevel(0);
+
+      // Check whether "clause" is already satisfied or represents a tautological clause.  
+      // By the way, search for multiple copies of the same literal and literals evaluating to FALSE. 
+      for (unsigned int c = 0; c < stop; ++c)
+		{
+		  // Get the next literal.
+		  unsigned int l(clause[c]);
+
+		  // "clause" satisfied by "l"? Do we have a tautological clause?
+		  if (m_assignment[Lit(l)] || (l ^ 1) == lit)
+			{ return true; }
+
+		  // Do we have to take the current literal into account?
+		  if (!m_assignment[Lit(l)^1] && l != lit )
+			{ 
+			  lit = l; 
+			  // Set universal flag
+			  setUniFlag(l);
+
+			  clause[size++] = l; 
+
+			  if( !isUniversal(l) && q_level[l>>1] > maxeqlevel ) 
+				{
+				  maxeqlevel = q_level[l>>1]; 
+				}
+			}
+		}
+
+	  unsigned int esize = sortClauseEU(clause, size, maxeqlevel);
+
+      // Do we have an empty clause? CNF formula unsatisfiable?
+      if (size == 0)
+		{ 
+		  m_emptyClause = true; 
+		  m_result = QUANTOM_UNSAT; 
+		  return false; 
+		}
+
+      // Do we have a unit clause?
+      if (size == 1)
+		{
+		  if(isUniversal(clause[0]) ) 
+			{
+			  m_emptyClause = true; 
+			  m_result = QUANTOM_UNSAT; 
+			  return false;
+			}
+
+		  // Push the unit literal to the unit clause vector.
+		  //m_unitClauses.push_back(clause[0]); 
+
+		  setUnit(clause[0]);
+		  // Push the unit literal as an implication onto the decision stack.
+		  addImplication(clause[0], NULL);
+
+		  unsigned int* conflictingClause(NULL);
+		  // What about the effects of this implication?
+		  if (!pre && (conflictingClause = deduce(false)) != NULL)
+			{
+			  // found conflict in cube -> QBF is SAT
+			  if( isUniversal(conflictingClause[0]) )
+				{ return true; }
+
+			  m_emptyClause = true; 
+			  m_result = QUANTOM_UNSAT; 
+			  return false; 
+			}
+		  // Everything went fine.
+		  return true; 
+		}
+
+      // Do we have a binary clause?
+      if (size == 2)
+		{
+		  bool dynamic = ( lbd > 1 );
+		  if ( addBinary(clause[0], clause[1], dynamic ) )
+			{
+			  increaseActivityQuBE(Lit(clause[0]));
+			  increaseActivityQuBE(Lit(clause[1]));
+			}
+
+		  // Everything went fine.
+		  return true; 
+		}
+
+	  unsigned long long sign = calcSignature( clause, size );
+	  
+	  // Initialization.
+	  unsigned int* cptr(new unsigned int[size + 1]); 
+	  pointToClause* ptc = new pointToClause(cptr, lbd, esize, size);
+
+      // Copy all literals of "clause" to "cptr".
+      for (unsigned int l = 0; l < size; ++l)
+		{ 
+		  cptr[l] = clause[l]; 
+
+		  assert( clause[l] != 0 );
+
+		  //update occurence list
+		  increaseActivityQuBE(Lit(clause[l]));
+		  q_occur[Lit(clause[l])].push_back(ptc);
+		}
+
+      // Add the final clause stopper.
+      cptr[size] = 0;
+
+	  ptc->setSign(sign);
+	  ptc->setID(nextClauseID());
+    
+	  // Update "m_watches".
+	  if( m_forward )
+		{
+		  ptc->setWatches();
+		  m_watches[clause[0]].push_back(ptc);
+		  if( esize != 1 )
+			{ m_watches[clause[1]].push_back(ptc); }
+
+		  // Update "m_watches" for universal variable
+		  if( esize < size ) 
+			{ m_watches[Lit(clause[esize])].push_back(ptc); }
+		}
+	  else
+		{
+		  m_watches[clause[esize-1]].push_back(ptc);
+		  ptc->wl0 = clause[esize-1];
+		  if( esize != 1 )
+			{ 
+			  ptc->wl1 = clause[esize-2];			  
+			  m_watches[clause[esize-2]].push_back(ptc); 
+			}
+ 
+		  // Update "m_watches" for universal variable
+		  if( esize < size ) 
+			{ 
+			  ptc->wla = clause[esize];			  
+			  m_watches[Lit(clause[esize])].push_back(ptc); 
+			}
+		}
+#ifdef DEBUG
+	  printClause(ptc);
+	  assert( checkSorting( ptc ) );
+#endif
+
+      // Add a new clause to the clause database.
+      m_clauseDatabase.push_back(ptc);
+
+#ifdef COMBSOLVER
+	  ++e_orgclauses;
+#endif
+
+      // Everything went fine.
+      return true;
+    }
+
+	bool addSoftClause (std::vector<unsigned int>& clause, bool addMultiplexer = false);
+
+	std::vector< unsigned int > getDecisionStack( void );
+
+	/* C-Version of addClause */
+    bool addClause (unsigned int* clause, unsigned int num)
+    {
+      // What about the empty clause?
+      if (m_emptyClause)
+		{ return false; }
+ 
+      // Are we really on decision level 0?
+      assert(m_decisionLevel == 0); 
+
+      // If the clause to be added is empty, we might have a problem.
+      assert(clause != NULL && num > 0);
+
+      // Sort "clause" to speedup the checks below.
+      std::sort(clause, clause + num);
+
+      // Initialization.
+      unsigned int size(0);
+      unsigned int lit(0);
+	  unsigned int maxeqlevel(0);
+      unsigned int* cptr(new unsigned int[num + 1]); 
+
+      for (unsigned int c = 0; c < num; ++c)
+		{
+		  // Get the next literal.
+		  unsigned int l(clause[c]);
+
+		  // Variable indices are assumed to be greater 0.
+		  assert(l > 1); 
+		  
+		  assert( l < UNIFLAG );
+
+#ifdef DEBUG
+		  std::cout << "clause[" << c << "]: " << clause[c] << std::endl;
+#endif
+
+		  // "clause" satisfied by "l"? Do we have a tautological clause?
+		  if (m_assignment[l] || (l ^ 1 ) == lit )
+			{ delete [] cptr; return true; }
+
+		  // Do we have to take the current literal into account?
+		  if ( !m_assignment[l^1] && l != lit )
+			{ 
+			  lit = l; 
+			  // Set universal flag
+			  setUniFlag(l);
+			  cptr[size++] = l; 
+
+			  if( !isUniversal(l) && q_level[lit>>1] > maxeqlevel ) 
+				{
+				  maxeqlevel = q_level[lit>>1]; 
+				}
+			}
+		}
+
+	  unsigned int esize = sortClauseEU(cptr, size, maxeqlevel);
+
+      // Do we have an empty clause? CNF formula unsatisfiable?
+      if (size == 0)
+		{ 
+		  delete [] cptr; 
+		  m_emptyClause = true; 
+		  m_result = QUANTOM_UNSAT; 
+		  return false; 
+		}
+
+      // Do we have a unit clause?
+      if (size == 1)
+		{
+		  if(isUniversal(cptr[0]) ) 
+			{
+#ifdef OUTPUT
+			  std::cout << std::endl;
+#endif
+			  delete [] cptr;
+			  m_emptyClause = true;
+			  m_result = QUANTOM_UNSAT;
+			  return false;
+			}
+
+		  // Push the unit literal to the unit clause vector.
+		  //m_unitClauses.push_back(cptr[0]); 
+
+		  setUnit(cptr[0]);
+		  // Push the unit literal as an implication onto the decision stack.
+		  addImplication(cptr[0], NULL);
+
+		  delete [] cptr;
+
+		  unsigned int* conflictingClause(NULL);
+		  // What about the effects of this implication?
+		  if (deduce(false) != NULL)
+			{ 
+			  // found conflict in cube -> QBF is SAT
+			  if( isUniversal(conflictingClause[0]) )
+				{ return true; }
+
+			  m_emptyClause = true; 
+			  m_result = QUANTOM_UNSAT;
+			  std::cout << "clause leads to unsat (c)" << std::endl;
+
+#ifdef OUTPUT
+			  std::cout << std::endl;
+#endif
+			  return false; 
+			}
+
+		  // Everything went fine.
+		  return true; 
+		}
+
+      // Do we have a binary clause?
+      if (size == 2)
+		{
+		  bool dynamic( false );
+		  if ( addBinary(cptr[0], cptr[1], dynamic ) )
+			{
+			  increaseActivityQuBE(Lit(clause[0]));
+			  increaseActivityQuBE(Lit(clause[1]));
+			}
+
+#ifdef DEBUG
+		  std::cout << "binclause: " << getLit(cptr[0]) << " [" << assignedTo(cptr[0]) << "] " << getLit(cptr[1]) << " [" << assignedTo(cptr[1]) << "]" << std::endl;
+#endif
+		  
+		  delete [] cptr;
+
+		  // Everything went fine.
+		  return true; 
+		}
+
+      // Initialization.
+	  pointToClause* ptc = new pointToClause(cptr, 1, esize, size);
+
+      for (unsigned int l = 0; l < size; ++l)
+		{ 
+
+		  assert( cptr[l] != 0 );
+		  //update occurence list
+		  increaseActivityQuBE(Lit(cptr[l]));
+		  q_occur[Lit(cptr[l])].push_back(ptc);
+		}
+
+      // Add the final clause stopper.
+      cptr[size] = 0;
+
+	  ptc->setWatches();
+	  ptc->calcSign();
+	  ptc->setID(nextClauseID());
+
+    
+      // Update "m_watches".
+      m_watches[cptr[0]].push_back(ptc);
+	  if( esize != 1 )
+		{ m_watches[cptr[1]].push_back(ptc); }
+
+	  // Update "m_watches" for universal variable
+	  if( esize < size ) 
+		{ m_watches[Lit(cptr[esize])].push_back(ptc); }
+
+#ifdef DEBUG
+	  printClause(ptc);
+	  assert( checkSorting( ptc ) );
+#endif
+
+      // Add a new clause to the clause database.
+      m_clauseDatabase.push_back(ptc);
+
+      // Everything went fine.
+      return true;
+    }
+
+	// Add new binary clause. Handle static/dynamic binaries
+	// Always checks if binary already exists
+	// Returns true if binary is added successfully
+	// Returns false if binary already exists
+	// "isLearned" is set in case of existing binary:
+	// Founded binary was static: "isLearned" = false
+	// Founded binary was dynamic: "isLearned" = true
+	bool addBinary ( unsigned int lit1, unsigned int lit2, bool& isLearned )
+	{
+	  unsigned int checklit(lit1);
+	  unsigned int seclit(lit2);
+
+	  if( m_binWatches[Lit(seclit)].size() < m_binWatches[Lit(checklit)].size() )
+		{
+		  checklit = lit2;
+		  seclit = lit1;
+		}
+
+	  // Check whether we already have that particular binary clause.
+	  const std::vector<unsigned int>& binWatches(m_binWatches[Lit(checklit)]); 
+
+	  unsigned int binSize((unsigned int)binWatches.size());
+	  unsigned int b(0);
+	  for (; b < binSize; ++b)		      
+		{
+		  if (binWatches[b] == seclit)
+			{ break; }
+		}
+					  
+	  // Do we have to update "m_binWatches"?
+	  if (b == binSize)
+		{
+		  // Add binary
+		  if(isLearned)
+			{
+			  m_binWatches[Lit(lit1)].push_back(lit2);
+			  m_binWatches[Lit(lit2)].push_back(lit1);
+			}
+		  else
+			{
+			  unsigned int learnedpos0 = m_binWatchesLearnedIndex[Lit(lit1)];
+
+			  if( m_binWatches[Lit(lit1)].size() == learnedpos0 )
+				{ m_binWatches[Lit(lit1)].push_back(lit2); }
+			  else
+				{ 
+				  unsigned int shiftlit0 = m_binWatches[Lit(lit1)][learnedpos0];
+				  m_binWatches[Lit(lit1)].push_back(shiftlit0);
+				  m_binWatches[Lit(lit1)][learnedpos0] = lit2;
+				}
+			  ++m_binWatchesLearnedIndex[Lit(lit1)];
+
+			  unsigned int learnedpos1 = m_binWatchesLearnedIndex[Lit(lit2)];
+
+			  if( m_binWatches[Lit(lit2)].size() == learnedpos1 )
+				{ m_binWatches[Lit(lit2)].push_back(lit1); }
+			  else
+				{
+				  unsigned int shiftlit1 = m_binWatches[Lit(lit2)][learnedpos1];
+				  m_binWatches[Lit(lit2)].push_back(shiftlit1);
+				  m_binWatches[Lit(lit2)][learnedpos1] = lit1;
+				}
+			  ++m_binWatchesLearnedIndex[Lit(lit2)];
+
+			}
+		  return true;
+		}
+	  // Set "isLearned"
+	  isLearned = (b >= m_binWatchesLearnedIndex[Lit(checklit)] );
+	  return false;
+	}
+
+	// Deletes binary "lit1 lit2" (NOT "lit2 lit1")
+	void removeBinary ( unsigned int lit1, unsigned int lit2 )
+	{
+#ifdef PREDEBUG
+	  std::cout << __func__ << " " << getLit(lit1) << " " << getLit(lit2) << std::endl;
+#endif
+
+	  unsigned int size = m_binWatches[Lit(lit1)].size();
+	  unsigned int i = 0;
+	  for( ; i != size; ++i )
+		{
+		  if( m_binWatches[Lit(lit1)][i] == lit2 )
+			{
+			  if( i < m_binWatchesLearnedIndex[Lit(lit1)] )
+				{
+				  m_binWatches[Lit(lit1)][i] = m_binWatches[Lit(lit1)][--m_binWatchesLearnedIndex[Lit(lit1)]];
+				  m_binWatches[Lit(lit1)][m_binWatchesLearnedIndex[Lit(lit1)]] = m_binWatches[Lit(lit1)][--size];
+				}
+			  else
+				{
+				  m_binWatches[Lit(lit1)][i] = m_binWatches[Lit(lit1)][--size];
+				}
+			  m_binWatches[Lit(lit1)].pop_back();
+			  --i;
+			  break;
+			}
+		}
+
+	  assert( i != size );
+	}
+
+	void removeBinary ( unsigned int lit, unsigned int& pos, unsigned int& size )
+	{
+#ifdef PREDEBUG
+	  std::cout << __func__ << " " << getLit(lit) << " " << pos << " " << size << std::endl;
+#endif
+	  if( pos < m_binWatchesLearnedIndex[Lit(lit)] )
+		{
+		  m_binWatches[Lit(lit)][pos] = m_binWatches[Lit(lit)][--m_binWatchesLearnedIndex[Lit(lit)]];
+		  m_binWatches[Lit(lit)][m_binWatchesLearnedIndex[Lit(lit)]] = m_binWatches[Lit(lit)][--size];
+		}
+	  else
+		{
+		  m_binWatches[Lit(lit)][pos] = m_binWatches[Lit(lit)][--size];
+		}
+	  m_binWatches[Lit(lit)].pop_back();
+	  --pos;
+	}
+
+	/* TODO: Add "swapping" everywhere, where a new binary is introduced */
+
+	// Swaps the role of a binary ( dynamic -> static )
+	// This may happen we got a (subsumed) binary from a static n-nary and a dynamic binary already exist
+	void swapBinaryInplace( unsigned int lit, unsigned int pos)
+	{
+	  assert( pos >= m_binWatchesLearnedIndex[Lit(lit)] );
+	  
+	  std::swap( m_binWatches[Lit(lit)][m_binWatchesLearnedIndex[Lit(lit)]], m_binWatches[Lit(lit)][pos]);
+	  ++m_binWatchesLearnedIndex[Lit(lit)];
+	}
+
+	// Swaps the role of a binary ( dynamic -> static )
+	// This may happen we got a (subsumed) binary from a static n-nary and a dynamic binary already exist
+	void swapBinary( unsigned int lit1, unsigned int lit2 )
+	{
+	  unsigned int b( 0 );
+	  unsigned int bsize( m_binWatches[Lit(lit1)].size() );
+	  for( ; b != bsize; ++b )
+		{
+		  if( m_binWatches[Lit(lit1)][b] == lit2 )
+			{ break; }
+		}
+
+	  assert( b != bsize );
+	  assert( b >= m_binWatchesLearnedIndex[Lit(lit1)] );
+	  
+	  std::swap( m_binWatches[Lit(lit1)][m_binWatchesLearnedIndex[Lit(lit1)]], m_binWatches[Lit(lit1)][b]);
+	  ++m_binWatchesLearnedIndex[Lit(lit1)];
+	}
+
+	void clearWatchlist( pointToClause* clause, bool staticclause, bool cube )
+	{
+	  assert( !cube || !staticclause );
+
+	  unsigned int wl0( clause->wl0 );
+	  unsigned int wl1( clause->wl1 );
+	  unsigned int wla( clause->wla );
+
+	  assert( wl0 != 0 );
+	  assert( (wl1 != 0) || (wla != 0) );
+
+	  if( staticclause )
+		{
+		  assert( !isUniversal(wl0) && ( !isUniversal(wl1) || (wl1 == 0) ) && ( isUniversal(wla) || (wla == 0) ) );
+
+#ifdef DEBUG
+		  std::cout << "remove static watchlit " << getLit(wl0) << std::endl;
+#endif
+		  removeWatchlit( m_watches[wl0], clause );
+		  if( wl1 != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove static watchlit " << getLit(wl1) << std::endl;
+#endif
+			  removeWatchlit( m_watches[wl1], clause );
+			}
+		  if( wla != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove static watchlit " << getLit(wla) << std::endl;
+#endif
+			  removeWatchlit( m_watches[Lit(wla)], clause );
+			}
+		}
+	  else if ( cube )
+		{
+		  assert( isUniversal(wl0) && ( isUniversal(wl1) || (wl1 == 0) ) && ( !isUniversal(wla) || (wla == 0) ) );
+
+#ifdef DEBUG
+		  std::cout << "remove cube watchlit " << getLit(wl0) << std::endl;
+#endif
+		  removeWatchlit( q_cubeWatches[Lit(wl0)], clause );
+		  if( wl1 != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove cube watchlit " << getLit(wl1) << std::endl;
+#endif
+			  removeWatchlit( q_cubeWatches[Lit(wl1)], clause );
+			}
+		  if( wla != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove cube watchlit " << getLit(wla) << std::endl;
+#endif
+			  removeWatchlit( q_cubeWatches[wla], clause );
+			}
+		}
+	  else
+		{
+		  assert( !isUniversal(wl0) && ( !isUniversal(wl1) || (wl1 == 0) ) && ( isUniversal(wla) || (wla == 0) ) );
+		  
+#ifdef DEBUG
+		  std::cout << "remove learned watchlit " << getLit(wl0) << std::endl;
+#endif
+		  removeWatchlit( m_learnedWatches[wl0], clause );
+		  if( wl1 != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove learned watchlit " << getLit(wl1) << std::endl;
+#endif
+			  removeWatchlit( m_learnedWatches[wl1], clause );
+			}
+		  if( wla != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "remove learned watchlit " << getLit(wla) << std::endl;
+#endif
+			  removeWatchlit( m_learnedWatches[Lit(wla)], clause );
+			}
+		}
+	}
+
+	void removeWatchlit( std::vector< pointToClause* >& watchlist, pointToClause* clause )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << " of ";
+	  printClause(clause);
+#endif
+	  unsigned int wsize( watchlist.size() );
+	  unsigned int i = 0;
+	  for( ; i != wsize; ++i )
+		{
+		  if( watchlist[i] == clause )
+			{
+			  watchlist[i--] = watchlist[--wsize];
+			  watchlist.pop_back();
+			  break;
+			}
+		}
+
+	  assert( i != wsize );
+	}
+
+
+	unsigned int deduceAssumptions (const std::vector<unsigned int>& assumptions)
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  // Clear "m_model".
+      for (unsigned int v = 1; v <= m_variables; ++v)
+		{ m_model[v] = 0; }
+
+	  // What about the empty clause?
+	  if (m_emptyClause)
+		{ return QUANTOM_UNSAT; }
+
+	  // If there are no variables, we don't have to perform unit propagation.
+	  if (m_variables == 0) 
+		{ return QUANTOM_SAT; }
+
+	  // "deduceAssumptions()" has to be executed on decision level 0.
+	  assert(m_decisionLevel == 0);
+
+	  if( setupLitLists() )
+		{
+		  unsigned int* conflictingClause(NULL);
+		  if( (conflictingClause = deduce() ) != NULL ) 
+			{ 
+			  m_control->setDone(); 
+			  // found conflict in cube -> QBF is SAT
+			  if( isUniversal(conflictingClause[0]) )
+				{ generateModel(); return QUANTOM_SAT; }
+			  return QUANTOM_UNSAT; 
+			}
+		}
+
+	  // Push all assumptions onto the decision stack and perform unit propagation.
+	  unsigned int assumeresult = setAssumptions(assumptions);
+	  if ( assumeresult != QUANTOM_UNKNOWN )
+		{ 
+		  if( assumeresult == QUANTOM_SAT )
+			{ generateModel(); }
+		  return assumeresult; 
+		}
+   
+	  // Copy all assigned variables to "m_model".
+	  for (unsigned int d = 1; d < m_dsEndIndex; ++d)
+		{ 
+		  if( q_level[Lit(m_decisionStack[d])>>1] == 1 )
+			{ m_model[m_decisionStack[d] >> 1] = m_decisionStack[d]; }
+		}
+    
+	  // Backtrack to decision level 0.
+	  if (m_decisionLevel > q_backtracklevel)
+		{ backtrack(q_backtracklevel); }
+
+	  // Everything went fine.
+	  return QUANTOM_UNKNOWN; 
+	}
+
+    // Helper function for pushing assumptions onto the decision stack.
+    // In case of a conflict, QUANTOM_UNSAT will be returned,
+	// In case of a solution, QUANTOM_SAT and otherwise QUANTOM_UNKNOWN. 
+    unsigned int setAssumptions (const std::vector<unsigned int>& assumptions)
+    {
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+      // What about the empty clause?
+      if (m_emptyClause)
+		{ return QUANTOM_UNSAT; }
+
+      // Initialization.
+      unsigned int aSize(assumptions.size());
+	  unsigned int* conflictingClause(NULL);
+
+      // Set all assignments specified by "assumptions".
+      for (unsigned int a = 0; a < aSize; ++a)
+		{
+		  // Get the next assignment.
+		  unsigned int lit(assumptions[a]);
+
+#ifdef DEBUG
+		  std::cout << "add assumption: " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+
+		  if( isUniversal(lit) )
+			{ return QUANTOM_UNSAT; }
+
+		  
+		  // Assumptions should be "don't touch", otherwise we may run into problems
+		  assert( m_donttouch[lit>>1] );
+
+		  // Variable indices are assumed to be greater 0.
+		  assert(lit > 1); 
+
+		  // Do we have to update all data structures depending on the number of variables?
+		  if ((lit >> 1) > m_variables)
+			{ updateDataStructures(lit >> 1); }
+
+		  // "lit" already incorrectly assigned?
+		  if (m_assignment[lit ^ 1])
+			{
+			  if ( m_decisionLevel > q_backtracklevel )
+				{ backtrack(q_backtracklevel); }
+			  return QUANTOM_UNSAT; 
+			}
+
+		  // "lit" currently unassigned?
+		  if (!m_assignment[lit])
+			{ 
+			  // Push "lit" as a "fake decision" onto the decision stack.
+			  addDecision(lit); 
+	    
+			  // What about the effects of this implication?
+			  if ( (conflictingClause = deduce()) != NULL)
+				{ 
+				  // Reset "m_binConflict".
+				  m_binConflict[0] = 0;
+				  m_binConflict[1] = 0;
+				  backtrack(q_backtracklevel);
+				  // found conflict in cube -> QBF is SAT
+				  if( isUniversal(conflictingClause[0]) )
+					{ return QUANTOM_SAT; }
+				  return QUANTOM_UNSAT; 
+				}
+			}
+		}
+
+	  unsigned int cSize( q_unitcubes.size() );
+
+      // Set all unit cubes
+	  for (unsigned int c = 0; c < cSize; ++c)
+		{
+		  // Get the next assignment.
+		  unsigned int lit(q_unitcubes[c]);
+
+#ifdef DEBUG
+		  std::cout << "add unit cube: " << getLit(lit) << std::endl;
+#endif
+
+		  assert( isUniversal(lit) );
+		  assert(lit > 1); 
+		  assert( (Lit(lit) >> 1) <= m_variables );
+
+		  // "lit" already incorrectly assigned?
+		  if (m_assignment[Lit(lit) ^ 1])
+			{
+			  if ( m_decisionLevel > q_backtracklevel )
+				{ backtrack(q_backtracklevel); }
+			  return QUANTOM_SAT; 
+			}
+
+		  // "lit" currently unassigned?
+		  if (!m_assignment[Lit(lit)])
+			{ 
+			  // Push "lit" as a "fake decision" onto the decision stack.
+			  addDecision(Lit(lit)); 
+	    
+			  // What about the effects of this implication?
+			  if ( (conflictingClause = deduce()) != NULL)
+				{ 
+				  // Reset "m_binConflict".
+				  m_binConflict[0] = 0;
+				  m_binConflict[1] = 0;
+				  backtrack(q_backtracklevel);
+				  // found conflict in cube -> QBF is SAT
+				  if( isUniversal(conflictingClause[0]) )
+					{ return QUANTOM_SAT; }
+				  return QUANTOM_UNSAT; 
+				}
+			}
+		}
+
+      // Everything went fine.
+      return QUANTOM_UNKNOWN;
+    }
+
+    // Preprocesses the current CNF formula. The return values are as follows:
+    //  0 -- unknown.
+    // 20 -- unsatisfiable.
+	unsigned int preprocess ( void );
+
+    // Inprocesses the current CNF formula. The return values are as follows:
+    //  0 -- unknown.
+    // 10 -- satisfiable.
+    // 20 -- unsatisfiable.
+	unsigned int inprocess ( void );
+
+    // Solves the current CNF formula. The return values are as follows:
+    //  0 -- time limit exceeded.
+    // 10 -- satisfiable.
+    // 20 -- unsatisfiable.
+    unsigned int solve (void)
+    {
+      // Initialization.
+      std::vector<unsigned int> noAssumptions;
+
+      // Solve the CNF formula.
+      return solve(noAssumptions);
+    }
+
+	// lifts a solution, given by "assumptions"
+	// returns the lifted solution
+	// liftingmodes:
+	// 1 : conflict driven
+	// 2 : assumptions driven
+	// 3 : combine 1+2
+	std::vector< unsigned int > solveLifting ( std::vector<unsigned int>& assumptions, unsigned int liftingmode, unsigned int sort = 26 );
+
+
+	unsigned int initSolver ( void )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  if( !q_skiplearning ) 
+		{ q_togglelearning = false; }
+
+	  // Initialize "q_varOrder" for "q_litbylevel".
+	  if( q_varOrder[0] == NULL) 
+		{ ++q_decision;}
+
+	  for(unsigned int i = q_decision; i != q_varOrder.size(); ++i )
+		{
+		  if( q_varOrder[i] == NULL )
+			{ 
+			  VarHeap<double>* levelheap = new VarHeap<double>(m_activity, m_variables);
+			  q_varOrder[i] = levelheap;
+			}
+		  if( q_varOrder2[i] == NULL )
+			{					  
+			  VarHeap<unsigned int>* levelheap2 = new VarHeap<unsigned int>(m_activity2, m_variables);
+			  q_varOrder2[i] = levelheap2;		  
+			}
+
+#ifdef DEBUG
+		  std::cout << (i+1) << (((i&1)==0)?"e: ":"a: ");
+		  for( std::vector< unsigned int >::iterator it = q_litbylevel[i].begin(); it != q_litbylevel[i].end(); ++it )
+			{
+			  std::cout << getLit(*it) << " (" << m_activity[Lit(*it)>>1] << ") ";
+			}
+		  std::cout << std::endl;
+#endif
+		}
+
+	  // clear q_litbylevel
+	  // needed for incremental calls
+	  for( unsigned int i = 0; i != q_litbylevel.size(); ++i )
+		{
+		  q_litbylevel[i].clear();
+		}
+	  
+	  q_litbylevel.clear();
+	  q_litbylevel.resize(q_maxqlevel);
+		  
+	  m_literals = 0;
+	  for (unsigned int v = m_variables; v > 0; --v)
+		{
+
+		  if( q_level[v] == 0 || q_deleted[v] ) 
+			{ continue; }
+
+		  ++m_literals;
+		  // do not add variable if its already assigned or already added (possible in incremental mode)
+		  //if (!m_assignment[v << 1] && !m_assignment[(v << 1)^1] && !q_varOrder[(q_level[v]-1)]->inHeap(v) )
+		  if ( !q_varOrder[(q_level[v]-1)]->inHeap(v) )
+			{
+			  q_varOrder[(q_level[v]-1)]->insert(v); 
+			}
+		  if ( !q_varOrder2[(q_level[v]-1)]->inHeap(v) )
+			{
+			  q_varOrder2[(q_level[v]-1)]->insert(v);
+			}
+
+		  unsigned int level = q_level[v];
+
+		  if (level > q_maxqlevel)
+			{
+			  q_maxqlevel = level;
+			  q_litbylevel.resize(q_maxqlevel);
+			}
+			
+		  q_litbylevel[level-1].push_back(getUniFlag(v<<1));
+		}
+
+	  //Initialize solution order
+
+	  if( m_decHeu == 1 || m_decHeu == 2 )
+		{
+		  for (unsigned int v = 1; v <= m_variables; ++v)
+			{ 
+			  if( (m_binWatches[v<<1].size() + q_occur[v<<1].size()) < (m_binWatches[(v<<1)^1].size() + q_occur[(v<<1)^1].size()))
+				{ m_cache[v] = false; }
+			  else
+				{ m_cache[v] = true; }
+			}
+		}
+
+	  if( m_ip == 1 )
+		{
+		  for (unsigned int v = 1; v <= m_variables; ++v)
+			{ m_cache[v] ^= true; }
+		}
+	  else if( m_ip == 2 )
+		{
+		  for (unsigned int v = 1; v <= m_variables; ++v)
+			{ 
+			  if( (q_level[v] & 1 ) != 0 )
+				{ m_cache[v] ^= true; }
+			}
+		}
+	  else if( m_ip == 3 )
+		{
+		  srand((unsigned int)time(0));
+		  for(unsigned int v = 1; v <= m_variables; ++v)
+			{
+			  unsigned int r = rand() % 2;
+			  m_cache[v] = (char)r;
+			}
+		}
+
+	  m_clausesStaticBinary = 0;
+	  m_clausesStatic = 0;
+	  // First, use the binary clauses to initialize the activities.
+	  for (unsigned int v = 1; v <= m_variables; ++v)
+		{ 
+		  m_activity[v] += (double)m_incVarActivity * (double)(m_binWatches[v << 1].size() + (double)m_binWatches[(v << 1) ^ 1].size()); 
+		  
+		  m_activity2[v] += (unsigned int)m_binWatches[v<<1].size() + (unsigned int)m_binWatches[(v<<1)+1].size();
+		  
+		  m_clausesStaticBinary += (unsigned int)m_binWatches[v << 1].size() + (unsigned int)m_binWatches[(v << 1) ^ 1].size();
+				  
+		}
+	  
+	  m_clausesStaticBinary >>= 1;
+	  m_clausesBinary = m_clausesStaticBinary;
+	  m_clausesStatic = m_clausesStaticBinary + (unsigned int)m_clauseDatabase.size();
+	  m_clauses = m_clausesStatic;
+
+	  if (m_clauses == 0)
+		{
+		  return QUANTOM_SAT;
+		}
+
+#ifdef COMBSOLVER
+	  // update org clauses after preprocessing
+	  e_orgclauses = m_clauses;
+#endif
+			  
+	  // Now, use the non-binary clauses to update the activities.
+	  unsigned int size((unsigned int)m_clauseDatabase.size());
+	  for (unsigned int c = 0; c < size; ++c)
+		{
+		  unsigned int* clause(m_clauseDatabase[c]->clause());
+		  unsigned int p(0);
+		  while (clause[p] != 0)
+			{
+			  m_activity[Lit(clause[p]) >> 1] += m_incVarActivity;
+			  ++p;
+			}
+		}
+			  
+	  // Now, use the non-binary clauses to update the activities.
+	  size = (unsigned int)q_occur.size();
+	  for (unsigned int c = 2; c < size; c+=2)
+		{ 
+		  m_activity2[c>>1] += (unsigned int)q_occur[c].size() + (unsigned int)q_occur[c+1].size();
+		}
+	
+	  for( unsigned int p = 1; p <= m_variables; ++p )
+		{
+
+		  if( q_level[p] == 0 || q_deleted[p] ) 
+			{ continue; }
+
+		  if( m_weight[p] != 1 )
+			{
+#ifdef DEBUG
+			  std::cout<< "change activity of " << p << " from " << m_activity[p] << ", " << m_activity2[p] << ", (" << m_activity3[p<<1] << ", " << m_activity3[(p<<1)^1] << ") " << std::endl;
+#endif
+			  m_activity[p] *= m_weight[p];
+			  m_activity2[p] = (unsigned int)((double)m_activity2[p]*m_weight[p]);
+			  m_activity3[p<<1] = (unsigned int)((double)m_activity3[p]*m_weight[p]);
+			  m_activity3[(p<<1)^1] = (unsigned int)((double)m_activity3[p]*m_weight[p]);
+
+#ifdef DEBUG
+			  std::cout<< "to " << m_activity[p] << ", " << m_activity2[p] << ", (" << m_activity3[p<<1] << ", " << m_activity3[(p<<1)^1] << ") " << std::endl;
+#endif
+			}
+		  if (q_varOrder[q_level[p]-1]->inHeap(p))
+			{ q_varOrder[q_level[p]-1]->update(p); } 
+
+		  if (q_varOrder2[q_level[p]-1]->inHeap(p))
+			{ q_varOrder2[q_level[p]-1]->update(p); } 
+		}
+
+	  if( m_decHeu == 3 )
+		{ calcDecisionQuBE(); }
+
+	  for( unsigned int p = 1; p <= m_variables; ++p )
+		{
+		  if( m_polarity[p] != 0 )
+			{ m_cache[p] = m_polarity[p]&1; }
+		}
+	  return QUANTOM_UNKNOWN;
+	}
+
+	//unsigned int Maximize ( unsigned int mode, unsigned int& opt );
+	//void MaximizeUnit( void );
+
+	void storeRuntime ( double timeS )
+	{
+      struct rusage resources;
+	  getrusage(RUSAGE_SELF, &resources); 
+	  double timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+	  if( m_control->getSumTime() )
+		{ m_runtime += (timeC-timeS); }
+	  else
+		{ m_runtime = (timeC-timeS); }
+	  
+	  m_control->setTimeSetted(false);
+	}
+
+    // Solves the current CNF formula taking the specified assumptions into account. 
+    // The assumptions have to be encoded in the same way as the literals of a clause (see "ad->clause()").
+    // The return values are as follows:
+    //  0 -- time limit exceeded.
+    // 10 -- satisfiable.
+    // 20 -- unsatisfiable.
+    unsigned int solve (const std::vector<unsigned int>& assumptions) 
+    {
+      // What about the empty clause?
+      if (m_emptyClause)
+		{ m_control->setDone(); return QUANTOM_UNSAT; }
+
+      // If there are no variables, the CNF formula is satisfiable by definition.
+      if (m_variables == 0 || ( m_clauseDatabase.empty() && m_binWatches.empty() ) ) 
+		{
+		  m_control->setDone(); 
+		  return QUANTOM_SAT; 
+		}
+	  
+      // The QBF solving process has to be started on decision level 0.
+	  if( q_liftingmode < 2 )
+		{ assert(m_decisionLevel == 0); }
+
+      // If "m_binConflict" is not equal to (0,0), we might have a problem.
+      assert(m_binConflict[0] == 0 && m_binConflict[1] == 0);
+
+	  if( q_liftingmode == 0 )
+		{ m_rootLevel = 0; }
+
+      // If "solve" called for the first time, initialize "litlists" and preprocess
+ 
+	  double timeC(0.0);
+	  struct rusage resources;
+	  getrusage(RUSAGE_SELF, &resources);
+	  double timeS = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+	  m_control->setStartTime(timeS);
+
+	  // Define all assumption literal as don't touch. Otherwise we run into problems with preprocessing
+	  for( unsigned int i = 0; i != assumptions.size(); ++i )
+		{
+		  setDontTouch(assumptions[i]>>1);
+		}
+
+	  // just preprocess at first call
+	  if( q_prepro && m_decisions == 0 && m_conflicts == 0 )
+		{
+		  if ( preprocess() == QUANTOM_UNSAT)
+			{ return exitQuantom(QUANTOM_UNSAT, timeS); }
+			  
+		  q_prepro = false;
+
+		  getrusage(RUSAGE_SELF, &resources); 
+		  timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+		  if ( ( m_control->getCPULimit() > 0.0 ) && ( m_control->reachedTimeout(timeC) ) )
+			{ 
+			  return exitQuantom(QUANTOM_UNKNOWN, timeS); 
+			}
+		}
+
+      unsigned int* conflictingClause(NULL);
+
+	  if( ( q_liftingmode == 0 ) && setupLitLists() )
+		{
+		  if( (conflictingClause = deduce()) != NULL ) 
+			{ 
+			  return exitQuantom(QUANTOM_UNSAT, timeS);
+			}
+		}
+
+	  if( !q_solve )
+		{
+		  return exitQuantom(QUANTOM_UNKNOWN, timeS);
+		}
+
+      // Push all assumptions onto the decision stack and perform .
+	  unsigned int assumeresult = setAssumptions(assumptions);
+      if ( assumeresult != QUANTOM_UNKNOWN )
+		{ 
+		  return exitQuantom(assumeresult, timeS);
+		}
+
+      // Update "m_rootLevel".
+      m_rootLevel = m_decisionLevel; 
+
+#ifdef DEBUG
+      std::cout << "m_rootLevel: " << m_rootLevel << std::endl;
+#endif
+
+      // If "solve" has been called for the first time, do the following:
+      // -- Initialize the variables' activities.
+      // -- Initialize "m_varOrder" used by the decision heuristic.
+      if (m_decisions == 0 && m_conflicts == 0)
+		{
+
+#ifdef DEBUG
+		  printdatabase();
+#endif
+
+		  unsigned int initResult = initSolver();
+		  if( initResult != QUANTOM_UNKNOWN )
+			{ 
+			  return exitQuantom(initResult, timeS);
+			}
+		}
+
+	  if( m_control->getVerbosity() > 0 )
+		{
+		  std::cout << "c start solving with" << std::endl
+					<< "#variables..............: " << m_literals             << std::endl
+					<< "#static binary clauses..: " << m_clausesStaticBinary  << std::endl
+					<< "#static clauses.........: " << m_clausesStatic        << std::endl
+					<< "#dynamic binary clauses.: " << m_clausesDynamicBinary << std::endl
+					<< "#dynamic clauses........: " << m_clausesDynamic       << std::endl
+					<< "#binary clauses.........: " << m_clausesBinary        << std::endl 
+					<< "#clauses................: " << m_clauses              << std::endl
+					<< "#cubes..................: " << m_cubes                << std::endl;
+		}
+
+	  //printdatabase(true);
+
+#ifdef DEBUG
+	  //printdatabase();
+	  //exportDatabase();
+	  dumpCNF(std::cout);
+#endif
+
+	  q_cachedImplIndex = m_dsEndIndex;
+
+      // Initialization.
+	  unsigned unlearningfactor( m_clauseDatabase.size() + q_solutionDatabase.size() );
+	  unsigned int learntClausesLimit( unlearningfactor );
+	  unsigned int learntCubesLimit( unlearningfactor );
+	  //unsigned int learntClausesLimit(10000);
+	  //unsigned int learntCubesLimit(10000);
+	  unsigned int lastbincount(m_clausesBinary);
+	  m_currentRestarts = 0;
+	  bool sol(true);
+
+      // The main QBF solving loop.
+	  do {
+		sol = true;
+		while (decide())
+		  {
+#ifdef COMBSOLVER
+			if( e_toggleexport && e_nowexport )
+			  {
+#ifdef OUTPUT
+				std::cout << "e";
+#endif
+				e_switching = m_decisionLevel;
+				e_startswitching = m_decisionLevel;
+#ifdef EXPORTDEBUG
+				std::cout << "c set e_switching: " << e_switching << std::endl;
+#endif
+
+				assert( m_dsEndIndex == m_dsImplIndex );
+
+				Implications impl(m_decisionLevel);
+				qbf::LBool result = exportAIGQBF(impl);
+				if( result == qbf::LTrue )
+				  {
+					++e_aigsat;
+					if( !solution_analysis2(impl) )
+					  { return exitQuantom(QUANTOM_SAT, timeS); }
+				  }
+				else if ( result == qbf::LFalse )
+				  {
+					++e_aigunsat; 
+					if( !analyzeAIG(impl) )
+					  { return exitQuantom(QUANTOM_UNSAT, timeS); }
+				  }
+				++e_counter;
+				e_nowexport = false;
+			  }
+#endif
+			// Perform "Boolean Constraint Propagation".
+			while ((conflictingClause = deduce()) != NULL)
+			  {
+				// If we got a empty clause on decision Level 0: Problem is UNSAT
+				// If we got a empty cube on decision Level 0: Problem is SAT
+				int rval = 20;
+				if( isUniversal(conflictingClause[0]) )
+				  { rval = 10; }
+
+				// Unresolvable conflict?
+				if (m_decisionLevel <= m_rootLevel )
+				  { 
+					// Reset "m_binConflict".
+					m_binConflict[0] = 0;
+					m_binConflict[1] = 0;
+
+					return exitQuantom(rval, timeS);
+				  }
+	  
+				// Empty Clause? -> Conflict
+				// Empty Cube? -> Solution
+				if( !analyze(conflictingClause) )
+				  { 
+					// Reset "m_binConflict".
+					m_binConflict[0] = 0;
+					m_binConflict[1] = 0;
+				
+					return exitQuantom(rval, timeS); 
+				  }
+
+				// What about the time limit?
+				if ( ( ( m_conflicts & 511 ) == 0 ) && m_control->getCPULimit() > 0.0 )
+				  {
+					getrusage(RUSAGE_SELF, &resources); 
+					timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+					//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+					if ( ( m_control->getCPULimit() > 0.0 ) && m_control->reachedTimeout(timeC) ) 
+					  { 
+						return exitQuantom(QUANTOM_UNKNOWN, timeS); 
+					  }
+				  }
+
+				// We found a unit a decision level 0?
+				if( m_decisionLevel < m_rootLevel )
+				  {
+					// First deduce new units
+					if( ( conflictingClause = deduce(false) ) != NULL )
+					  { 
+						return exitQuantom(QUANTOM_UNSAT, timeS); 
+					  }
+					// Put assumptions back on stack
+					assumeresult = setAssumptions( assumptions );
+					if( assumeresult != QUANTOM_UNKNOWN )
+					  { 
+						return exitQuantom(assumeresult, timeS); 
+					  }
+
+					// Root level may have changed due to new unit
+					m_rootLevel = m_decisionLevel;
+				  }
+			  }
+
+			// What about simplifying the clause database?
+			if ( m_clausesDynamic >= learntClausesLimit )
+			  {
+				// Simplify the clause database
+				if ( !simplify() )
+				  { 
+					return exitQuantom(QUANTOM_UNSAT, timeS); 
+				  }
+
+				// Maybe we added a new unit?
+				if( ( m_decisionLevel == 0 ) && ( m_dsImplIndex != m_dsEndIndex ) )
+				  { 
+					if( (conflictingClause = deduce()) != NULL )
+					  { 
+						return exitQuantom(QUANTOM_UNSAT, timeS); 
+					  }
+				  }
+			
+				// Update "learntClausesLimit".
+				learntClausesLimit *= 1.1;
+			  }
+
+			if ( (m_cubes >= learntCubesLimit) )
+			  {
+				// Simplify the cube database
+				if( !simplifyCube() )
+				  { 
+					return exitQuantom(QUANTOM_SAT, timeS); 
+				  }
+
+				// Maybe we added a new unit?
+				if( ( m_decisionLevel == 0 ) && ( m_dsImplIndex != m_dsEndIndex ) )
+				  { 
+					if( ( conflictingClause = deduce() ) != NULL )
+					  { 
+						return exitQuantom(QUANTOM_UNSAT, timeS); 
+					  }
+				  }
+
+				// Update "learntCubesLimit".
+				learntCubesLimit *= 1.1;
+				
+				if( (q_simplifications&7) == 0 )
+				  {
+					// Remove subsumed cubes
+					cubeSubsumption();
+				  }
+			  }
+
+
+#ifdef COMBSOLVER
+			if( (e_toggleexport && (int)m_decisionLevel == e_switching ) || ( e_lastcount > (m_nxtRestart>>1) && e_switchcount == 0) )
+			  {
+#ifdef OUTPUT
+				std::cout << "e";
+#endif
+				e_lastcount = 0;
+
+				if( e_switching < 0 )
+				  {
+					e_switching = m_decisionLevel;
+					e_startswitching = m_decisionLevel;
+				  }
+
+				Implications impl(m_decisionLevel);
+				qbf::LBool result = exportAIGQBF(impl);
+				if( result == qbf::LTrue )
+				  {
+					++e_aigsat;
+					if( !solution_analysis2(impl) )
+					  { return exitQuantom(QUANTOM_SAT, timeS); }
+				  }
+				else if ( result == qbf::LFalse )
+				  {
+					++e_aigunsat; 
+					if( !analyzeAIG(impl) )
+					  { return exitQuantom(QUANTOM_UNSAT, timeS); }
+				  }
+				++e_counter;
+			  }
+#endif
+
+			bool didrestart(false);
+			switch(m_restartHeu)
+			  {
+			  case 1:
+				// What about performing a restart?
+				if ( ( ( (m_conflicts +q_solutions) >= m_nxtRestart ) && m_decisionLevel > m_rootLevel ) )
+				  {
+					++m_restartAttempts;
+#ifdef OUTPUT
+					std::cout << m_agility;
+#endif
+					
+					if( !m_useAgility || ( m_agility < m_agilityThreashold ) )
+					  {
+						// Update "m_restarts".
+						++m_restarts;
+						++m_currentRestarts;
+#ifdef OUTPUT
+						std::cout << ",R";
+#endif
+
+#ifdef COMBSOLVER
+						// Perform a restart.
+						if( e_togglerestart )
+						  {
+							int rlevel = m_decisionLevel-e_switchcount+1;
+							if(rlevel < 0 ) { rlevel = 0; }
+							else if( rlevel == (int)m_decisionLevel ) {rlevel = (int)m_decisionLevel-1;}
+							backtrack((unsigned int)rlevel);
+						  }
+						else
+#endif
+						  {
+					    	backtrack(0);
+					      }
+
+#ifdef COMBSOLVER
+						if( !e_togglerestart )
+						  {
+						    e_switching = -1;
+						    e_startswitching = -1;
+						    e_toggleexport ^= true;
+						    e_aigtimeout = 1;
+					      }
+						else
+						  {	
+						    e_togglerestart = false;
+					      }
+						e_switchcount = 0;
+#endif
+
+						// Toggle "m_decVarSign".
+						if( m_switchVarSign )
+						  {
+							m_decVarSign = m_decVarSign ^ true; 
+						  }
+						if( m_resetHeu )
+						  {	resetHeu(); }
+						
+						didrestart = true;
+					  }
+					
+					// Update "m_nxtRestart".
+#ifdef COMBSOLVER
+					if( e_togglerestart )
+					  {	m_nxtRestart += (luby(m_currentRestarts) << m_lubyShift)>>1; }
+					else
+#endif
+					  { m_nxtRestart += (luby(m_currentRestarts) << m_lubyShift ); }
+				  }
+				break;
+			  case 2:
+				if( m_innercounter >= m_nxtRestarti && m_decisionLevel > m_rootLevel )
+				  {
+#ifdef COMBSOLVER
+					std::cout << "restart heuristic 2 not supported with combined solver"<< std::endl;
+					exit(0);
+#endif
+#ifdef OUTPUT
+					std::cout << m_agility;
+#endif
+					++m_restartAttempts;
+					if( !m_useAgility || (m_agility < m_agilityThreashold ) )
+					  {					
+#ifdef OUTPUT
+						std::cout << ",R";
+#endif
+						// Perform a restart.
+						backtrack(0);	
+						
+						++m_outercounter;
+						++m_restarts;
+						++m_currentRestarts;
+
+						if( m_switchVarSign )
+						  { 
+							m_decVarSign = m_decVarSign ^ true; 
+						  }
+						if( m_resetHeu )
+						  {	resetHeu(); }
+
+						didrestart = true;
+					  }
+
+					if( m_outercounter >= m_nxtRestarto  )
+					  {
+						m_nxtRestarti = 512;
+						m_nxtRestarto += 8;
+						m_outercounter = 0;
+					  }
+					else
+					  {
+						m_nxtRestarti += 64;
+					  }
+					m_innercounter = 0;
+				  }
+				break;
+			  case 3:
+#ifdef COMBSOLVER
+				std::cout << "restart heuristic 3 not supported with combined solver"<< std::endl;
+				exit(0);
+#endif
+				m_avgGlobalDL += (double) m_decisionLevel;
+				m_avgLocalDL += (double) m_decisionLevel;
+				
+				if( ( (m_conflicts+q_solutions) & 127 ) == 1 && (m_conflicts+q_solutions) > 100)
+				  {
+#ifdef DEBUG
+					std::cout << m_avgGlobalDL << " " << m_avgLocalDL;
+#endif
+					if ( m_decisionLevel > m_rootLevel && ( 0.8 * ( m_avgLocalDL / 128.0 ) ) > ( m_avgGlobalDL / (double) (m_conflicts+q_solutions) ) )
+					  { 
+						++m_restartAttempts;
+#ifdef OUTPUT
+						std::cout << m_agility;
+#endif
+
+						if( !m_useAgility || ( m_agility < m_agilityThreashold ) )
+						  {
+#ifdef OUTPUT
+							std::cout << ",R";
+#endif
+							// Perform a restart.
+							backtrack(0);
+						
+							// Update "m_restarts".
+							++m_restarts;		      		     
+							++m_currentRestarts;
+
+							// Toggle "m_decVarSign".
+							if( m_switchVarSign )
+							  {
+								m_decVarSign = m_decVarSign ^ true; 
+							  }
+							
+							if( m_resetHeu )
+							  {	resetHeu(); }
+
+							didrestart = true;
+						  }
+					  }
+					m_avgLocalDL = 0.0;
+				  }
+				break;
+			  case 0:
+				break;
+			  }
+
+			if( didrestart )
+			  {
+				if( q_inpro && 
+					( q_newunit || 
+					  ( (lastbincount+64) < m_clausesBinary ) 
+					  || ((m_restarts&31) == 0 ) 
+					  ) 
+					)
+				  {
+					q_newunit = false;
+					unsigned int inprores = inprocess();
+
+					if( inprores != QUANTOM_UNKNOWN )
+					  { 
+						return exitQuantom(QUANTOM_UNSAT, timeS);
+					  }
+
+					getrusage(RUSAGE_SELF, &resources); 
+					timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+					//std::cout << "con: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+					if ( ( m_control->getCPULimit() > 0.0 ) && m_control->reachedTimeout(timeC) ) 
+					  { 
+						return exitQuantom(QUANTOM_UNKNOWN, timeS); 
+					  }
+
+					lastbincount = m_clausesBinary;
+
+#ifdef DEBUG
+					printdatabase(true);
+#endif
+				  }
+
+				assumeresult = setAssumptions(assumptions);
+				if( assumeresult != QUANTOM_UNKNOWN )
+				  { 
+					return exitQuantom(assumeresult, timeS); 
+				  }
+			  }
+		  }
+		// At this point, there's no variable left to serve as a decision variable. 
+		// So, we have found a satisfying variable assignment and do some solution analysis and backtracking
+
+		// What about the time limit?
+		if ( ( (q_solutions & 511) == 0 ) && m_control->getCPULimit() > 0.0 )
+		  {
+			getrusage(RUSAGE_SELF, &resources); 
+
+			timeC = (double) resources.ru_utime.tv_sec + 1.e-6 * (double) resources.ru_utime.tv_usec;
+			//std::cout << "sol: timeS: " << m_control->getStartTime() << "timeC: " << timeC << " timeout: " << m_control->getCPULimit() << std::endl;
+			if ( ( m_control->getCPULimit() > 0.0 ) && m_control->reachedTimeout(timeC) ) 
+			  { 
+				return exitQuantom(QUANTOM_UNKNOWN, timeS); 
+			  }
+		  }
+
+		sol = solution_analysis2();
+
+			// We found a unit a decision level 0?
+		if( m_decisionLevel < m_rootLevel )
+		  {
+			// First deduce new units
+			if( (conflictingClause = deduce(false)) != NULL )
+			  { 
+				return exitQuantom(QUANTOM_UNSAT, timeS);
+			  }
+			// Put assumptions back in stack
+			assumeresult = setAssumptions( assumptions );
+			if( assumeresult != QUANTOM_UNKNOWN )
+			  { 
+				return exitQuantom(assumeresult, timeS);
+			  }
+
+			// Root level may have changed due to new unit
+			m_rootLevel = m_decisionLevel;
+		  }
+		
+	  } while( sol );
+
+	  // Return 10 (satisfiable CNF formula).
+	  return exitQuantom( QUANTOM_SAT, timeS );
+	}
+
+	unsigned int getExtendedResult( void ) const 
+	{ return m_result; } 
+
+	unsigned int exitQuantom( unsigned int result, double timeS )
+	{
+	  m_result = result;
+
+	  // If we have an emptyclause, the result HAVE to be UNSAT
+	  assert ( !m_emptyClause || (result == QUANTOM_UNSAT) );
+
+	  if( result == QUANTOM_SAT )
+		{
+		  generateModel();
+		}
+	  else if ( result == QUANTOM_UNSAT )
+		{
+		  // If we have generated no emptyclause, the problem is only UNSAT under assumptions
+		  if( !m_emptyClause )
+			{ m_result = QUANTOM_UNSAT_WITH_ASSUMPTION; }
+		}
+	  else
+		{
+		  assert( result == QUANTOM_UNKNOWN );
+		}
+
+	  // What about the decision level?
+	  if (m_decisionLevel > q_backtracklevel)
+	    { 
+		  // Backtrack to decision level 0.
+		  backtrack(q_backtracklevel); 		  
+		}
+
+	  storeRuntime(timeS);
+
+	  m_control->setDone(); 
+
+	  return result;
+	}
+
+	// Write out all clauses and prefix
+	// Prefix consists of positive literals (not variables)
+	// Clauses are written in "2*+1" style
+	void exportCore( std::vector< std::vector< unsigned int > >& prefix, std::vector< std::vector< unsigned int > >& clauses, bool exportlearned = false ) const
+	{
+	  prefix = q_litbylevel;
+
+	  // get binary clauses first
+	  for ( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  unsigned int pLit = v<<1;
+		  unsigned int nLit = (v<<1)^1;
+
+		  std::vector< unsigned int > binclause(2,0);
+		  binclause[0] = pLit;
+
+		  unsigned int psize( m_binWatches[pLit].size() );
+		  for( unsigned int i = 0; i != psize; ++i )
+			{
+			  if( !exportlearned && ( i >= m_binWatchesLearnedIndex[pLit] ) )
+				{ break; }
+			  unsigned int seclit( m_binWatches[pLit][i] );
+			  if( Lit(seclit) < pLit )
+				{
+				  binclause[1] = Lit(seclit);
+				  clauses.push_back(binclause);
+				}
+			}
+
+		  binclause[0] = nLit;
+
+		  unsigned int nsize( m_binWatches[nLit].size() );
+		  for( unsigned int i = 0; i != nsize; ++i )
+			{
+			  if( !exportlearned && ( i >= m_binWatchesLearnedIndex[nLit] ) )
+				{ break; }
+			  unsigned int seclit( m_binWatches[nLit][i] );
+			  if( Lit(seclit) < nLit )
+				{
+				  binclause[1] = Lit(seclit);
+				  clauses.push_back(binclause);
+				}
+			}
+		}
+	  
+	  // Now get n-nary
+	  unsigned int csize( m_clauseDatabase.size() );
+	  for( unsigned int c = 0; c != csize; ++c )
+		{
+		  if( !exportlearned && ( m_clauseDatabase[c]->lbd() > 1 ) )
+			{ continue; }
+
+		  assert( m_clauseDatabase[c]->lbd() != 0 );
+
+		  unsigned int* lits = m_clauseDatabase[c]->clause();
+
+		  std::vector< unsigned int > nclause;
+		  unsigned int pos(0);
+		  while( lits[pos] != 0 )
+			{ nclause.push_back(Lit(lits[pos])); }
+	  
+		  clauses.push_back(nclause);
+		}
+	}
+
+    // Resets the QBF solving core. The following status flags/variables remain untouched:
+    // -- The QBF solving threads unique ID number: "m_id".
+    // -- The number of variables for which memory has been reserved: "m_variables".
+    void reset ( bool keepheuristics = false )
+    {
+      // Reset the clause database.
+      unsigned int size(m_clauseDatabase.size());
+      for (unsigned int c = 0; c < size; ++c)
+		{ delete m_clauseDatabase[c]; }
+      m_clauseDatabase.clear();
+	  
+      // Reset the cube database.
+      size = q_solutionDatabase.size();
+	  for (unsigned int c = 0; c < size; ++c)
+		{ delete q_solutionDatabase[c]; }
+	  q_solutionDatabase.clear();
+
+	  // Reset the variable order.
+	  for (unsigned int v = 0; v != q_maxqlevel; ++v )
+		{ 
+		  q_varOrder[v]->clear(); 
+		  q_varOrder2[v]->clear();
+		  q_litbylevel[v].clear();
+		}
+	
+	  for (unsigned int b = 0; b != m_bcpstats.size(); ++b )
+		{ m_bcpstats[b] = 0; }
+
+	  // Reset all variable related data structures.
+	  for (unsigned int v = 1; v <= m_variables; ++v)
+		{
+		  m_level[v]                  = 0;
+		  m_polarity[v]               = 0;
+		  m_weight[v]                 = 1.0;
+		  m_cache[v]                  = true;
+		  m_activity[v]               = 0.0;
+		  m_activity2[v]              = 0;
+		  m_activity3[v]              = 0;
+		  m_forcing[v]                = NULL;
+		  m_binForcing[v]             = 0;
+		  m_binWatchesLearnedIndex[v] = 0;	 
+		  q_reason[v]                 = 0;
+		  q_level[v]                  = 0;
+		  m_donttouch[v]              = false;
+		  q_deleted[v]                = false;
+		  q_replaces[v].clear();
+
+		  unsigned int pLit(v << 1);
+		  unsigned int nLit((v << 1) ^ 1); 
+		  m_assignment[pLit]          = false;
+		  m_assignment[nLit]          = false;
+
+		  m_watches[pLit].clear(); 
+		  m_watches[nLit].clear(); 
+		  m_learnedWatches[pLit].clear();
+		  m_learnedWatches[nLit].clear();
+		  q_cubeWatches[pLit].clear();
+		  q_cubeWatches[nLit].clear();
+		  m_binWatches[pLit].clear();
+		  m_binWatches[nLit].clear();
+		  q_occur[pLit].clear(); 
+		  q_occur[nLit].clear(); 
+
+		}
+
+	  // Reset some more status flags.
+	  m_runtime = 0.0;
+	  m_decisions = 0;
+	  m_bcps = 0;
+	  m_conflicts = 0;
+	  m_restarts = 0;
+	  m_restartAttempts = 0;
+	  m_currentRestarts = 0;
+	  m_simplifications = 0;
+	  q_simplifications = 0;
+	  m_lastSimplifyCount = 1;
+	  q_slbd = 1;
+	  m_agility = 0.9999;
+	  m_agilityThreashold = 0.25;
+	  m_incVarActivity = 1.0;
+	  m_varActMultiplier = 1.05;
+	  m_decisionLevel = 0;
+	  m_rootLevel = 0;
+	  m_dsEndIndex = 1;
+	  m_dsImplIndex = 1;
+	  q_dsPropIndex = 1;
+	  m_newDecision = false;
+	  m_binConflict[0] = 0;
+	  m_binConflict[1] = 0;
+	  m_innercounter = 0;
+	  m_outercounter = 0;
+	  m_nxtRestart = (1<<m_lubyShift);//antom: 256 quantom: 4096
+	  m_ccs = 1;
+	  q_multiplexed = false;
+	  m_literals = 0;
+	  m_clauses = 0;
+	  m_clausesBinary = 0;
+	  m_clausesStatic = 0;
+	  m_clausesStaticBinary = 0;
+	  m_clausesDynamic = 0;
+	  m_clausesDynamicBinary = 0;
+	  m_cubes = 0;
+	  m_clauselength = 0;
+	  m_clauseIDs = 0;
+	  m_avgGlobalDL = 0.0;
+	  m_avgLocalDL = 0.0;
+	  m_avgGlobalBTlevel = 0;
+	  m_avgLocalBTlevel = 0;
+	  q_solutions = 0;
+	  q_purelits = 0;
+	  q_dontcare = 0;
+	  q_decision = 0;
+	  q_maxqlevel = 0;
+	  q_minqlevel = 0;
+	  q_maxradix = 0;
+	  q_cachedImplIndex = 0;
+	  m_tlbd = 0;
+	  m_ttlbd = 0;
+	  m_recalcDecHeu = 0;
+	  m_lhbrclauses = 0;
+	  q_soltype = 0;
+	  q_newunit = false;
+	  q_refreshVarorder = false;
+	  q_inprocessings = 0;
+	  q_subsumptions = 0;
+	  q_selfsubsumptions = 0;
+	  q_monolits = 0;
+	  q_dclits = 0;
+	  q_cons = 0;
+	  q_equiv = 0;
+	  q_uplacons = 0;
+	  q_uplaequiv = 0;
+	  q_reslits = 0;
+	  q_mergedLevels = 0;
+	  q_deletedLevels = 0;
+	  q_unitprop = 0;
+	  q_liftingmode = 0;
+	  q_backtracklevel = 0;
+
+	  m_openIDs.clear();
+	  q_assumptions.clear();
+	  q_elimclauses.clear();
+	  q_unitcubes.clear();
+
+	  if (!keepheuristics )
+		{
+		  m_useAgility = false;
+		  m_lubyShift = 12;
+		  m_nxtRestarti = 1024; //default: 1024
+		  m_nxtRestarto = 32; //default: 32
+		  m_decVarSign = false;
+		  m_switchVarSign = true;
+		  m_forward = true;
+		  q_skiplearning = false;
+		  q_togglelearning = true;
+		  m_ip = 2;
+		  m_decHeu = 3;
+		  m_restartHeu = 1;
+		  m_resetHeu = false;
+		  m_cacheswap = true;
+		  m_lhbr = false;
+		  q_mincube = true;
+		  q_subsumption = false;
+		  q_nextsubsumption = false;
+		  q_upla = false;
+		  q_varelim = false;
+		  q_quantmerge = false;
+		  q_solutionorder = 1;
+		  q_solve = true;
+		  q_prepro = false;
+		  q_inpro = false;
+		  m_verbosity = 0;
+		}
+	}
+
+  private:
+
+	// Is a literal unassigned?
+	bool isOpen( unsigned int lit ) const
+	{ return ( !m_assignment[Lit(lit)] && ! m_assignment[Lit(lit)^1] ); }
+
+    // Updates all data structures depending on the number of variables to be able to handle "var" variables.
+    void updateDataStructures (unsigned int var)
+    {      
+#ifdef DEBUG
+	  std::cout << __func__ << " ( " << var << " ) " << std::endl;
+#endif
+      // Update "m_level".
+      m_level.resize(var + 1, 0); 
+
+      // Update "m_activity".
+      m_activity.resize(var + 1, 0.0);
+
+	  m_activity2.resize(var + 1, 0);
+
+      // Update "m_forcing".
+      m_forcing.resize(var + 1, NULL); 
+
+      // Update "m_binForcing".
+      m_binForcing.resize(var + 1, 0); 
+
+	  m_conflictClause.resize(var + 1);
+
+      // Update "m_model".
+      m_model.resize(var + 1, 0);
+
+	  // Update "m_preferences"
+	  m_polarity.resize(var + 1, 0);
+
+	  // Update "m_weight"
+	  m_weight.resize(var + 1, 1.0);
+
+      // Update "m_cache".
+      m_cache.resize(var + 1, true); 
+
+      // Update "m_cache".
+      m_donttouch.resize(var + 1, false); 
+
+	  // Update "q_reason".
+	  q_reason.resize(var + 1, 0); 
+
+	  // Update "q_solutioncube".
+	  q_solutioncube.resize(var + 1, 0);
+
+	  q_deleted.resize(var + 1, false);
+
+	  q_replaces.resize(var + 1);
+
+	  //q_keeplit.resize(var + 1, false);
+
+	  q_level.resize( var + 1, 0 );
+
+      // Initialization.
+      unsigned int max((var << 1) + 2);
+
+	  m_activity3.resize(max, 0);
+
+      // Update "m_decisionStack".
+      m_decisionStack.resize(max, 0); 
+	  
+	  //update "q_occur".
+	  q_occur.resize(max);
+
+      // Update "m_assignment".
+      m_assignment.resize(max, false);
+
+      // Update "m_watches".
+      m_watches.resize(max); 
+
+	  // Update "m_learndWatches".
+	  m_learnedWatches.resize(max);
+
+	  // Update "q_cubeWatches".
+	  q_cubeWatches.resize(max);
+
+      // Update "m_binWatches".
+      m_binWatches.resize(max); 
+
+	  // Update "m_binWatchesLearned".
+      //m_binWatchesLearned.resize(max);
+	  
+	  m_binWatchesLearnedIndex.resize(max);
+
+      // Update "m_variables".
+      m_variables = var; 
+    }
+
+    // Adds a decision to the decision stack.
+    void addDecision (unsigned int lit)
+    {    
+#ifdef DEBUG
+	  std::cout << "decision: " << getLit(lit) << " on dL " << (m_decisionLevel+1) 
+				<< " q_level: " << q_level[lit>>1] << " m_dsEndIndex: " << (m_dsEndIndex+1);
+	  std::cout << " VSIDS activity: [" << m_activity[lit>>1] << "]";
+	  std::cout << std::endl;
+#endif
+
+      // The variable corresponding to "lit" has to be undefined.
+      assert(!m_assignment[lit] && !m_assignment[lit ^ 1]); 
+	  assert( lit > 1 );
+
+      // Increment "m_decisionLevel".
+      ++m_decisionLevel; 
+
+	  //reset "q_reason"
+	  q_reason[lit >> 1] = 0;
+
+      // Update "m_assignment".
+      m_assignment[lit] = true;
+    
+      // Update "m_level".
+      m_level[lit >> 1] = m_decisionLevel;
+
+      // Update "m_forcing".
+      m_forcing[lit >> 1] = NULL;
+
+      // Update "m_binForcing".
+      m_binForcing[lit >> 1] = 0;
+
+	  setUniFlag(lit);
+
+	  // Push "lit" onto the decision stack.    
+      m_decisionStack[m_dsEndIndex++] = lit; 
+
+      // Update "m_newDecision".
+      m_newDecision = true;
+
+    }
+  
+    // Adds an implication forced by a non-binary clause to the decision stack.
+    void addImplication (unsigned int lit, unsigned int* fc )
+    {     
+#ifdef DEBUG
+	  std::cout << "imply " << getLit(lit) << " on dL " << m_decisionLevel << " by ";
+	  printClause(fc);
+	  std::cout << std::endl << " m_decisionLevel: " << (m_decisionLevel) << " m_dsEndIndex: " << (m_dsEndIndex+1) << std::endl;
+#endif
+
+      // The variable corresponding to "lit" has to be undefined.
+      assert( ( !m_assignment[Lit(lit)] && !m_assignment[Lit(lit) ^ 1]) || isDC(lit) ); 
+
+	  assert( lit > 1 );
+
+	  m_agility *= 0.9999;
+	  if( m_cache[Lit(lit)>>1] != (lit&1) )
+		{ m_agility += 0.0001; }
+
+	  // Update "m_assignment".
+      m_assignment[Lit(lit)] = true;
+
+	  // Update "m_level".
+	  if( !isDC(lit) )
+		{ m_level[Lit(lit) >> 1] = m_decisionLevel; }
+
+      // Update "m_forcing".
+      m_forcing[Lit(lit) >> 1] = fc;
+
+      // Update "m_binForcing".
+      m_binForcing[Lit(lit) >> 1] = 0;
+
+      // Push "lit" onto the decision stack.    
+      m_decisionStack[m_dsEndIndex++] = lit; 
+
+    }
+  
+    // Adds an implication forced by a binary clause to the decision stack.
+    void addBinImplication (unsigned int lit, unsigned int binFC )
+    {     
+#ifdef DEBUG
+	  std::cout << "binimply " << getLit(lit) << " on dL " << m_decisionLevel << " by " << getLit(binFC) << std::endl
+				<< "m_decisionLevel: " << m_decisionLevel << " m_dsEndIndex: " << (m_dsEndIndex+1) << std::endl;
+#endif
+
+      // "binFC" has to be greater 0, since variable indices have to be greater 0.
+      assert(binFC != 0); 
+	
+      // The variable corresponding to "lit" has to be undefined.
+      assert( !m_assignment[lit] && !m_assignment[lit^1] ); 
+
+	  assert( lit > 1 );
+
+	  m_agility *= 0.9999;
+	  if( m_cache[Lit(lit)>>1] != (lit&1) )
+		{ m_agility += 0.0001; }
+    
+      // Update "m_assignment".
+      m_assignment[Lit(lit)] = true;
+
+      // Update "m_level".
+      m_level[Lit(lit) >> 1] = m_decisionLevel;
+      
+      // Update "m_forcing".
+      m_forcing[Lit(lit) >> 1] = NULL;
+	
+      // Update "m_binForcing".
+      m_binForcing[lit >> 1] = binFC;
+	
+      // Push "lit" onto the decision stack.    
+      m_decisionStack[m_dsEndIndex++] = lit; 
+
+	}
+
+    // Selects the next decision variable and adds it to the decision stack using "addDecision()".
+    // Returns TRUE as long as decision variables (still unassigned variables) are available.
+    bool decide (void)
+    {
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  if( m_dsImplIndex != m_dsEndIndex )
+		{ return true; }
+
+#ifdef EXDEBUG
+	  std::cout << "lastlit: " << getLit( Lit(m_decisionStack[m_dsEndIndex-1])) << " reason: " << q_reason[Lit(m_decisionStack[m_dsEndIndex-1])>>1] << std::endl
+				<< "q_dec: " << q_decision << " q_max: " << q_maxqlevel << std::endl; 
+#endif
+
+#ifdef STATS
+	  if( (m_decisions & 127)==1 )
+		{ getFds(); }
+#endif
+
+	  while ( q_decision < q_maxqlevel )
+		{
+		  if( m_decHeu == 0 || m_decHeu == 3 )
+			{
+
+			  if( m_recalcDecHeu == 256 )
+				{ 
+				  //std::cout << "recalc decision" << std::endl;
+				  calcDecisionQuBE(); 
+				  m_recalcDecHeu = 0;
+				}
+
+			  // Do we have another variable within "q_varOrder"?
+			  while (!q_varOrder[q_decision]->empty())
+				{
+				  // Get the variable with the maximum activity.
+				  unsigned int var(( q_varOrder[q_decision]->top() << 1)^m_decVarSign);
+			  
+#ifdef EXDEBUG
+				  std::cout << "next decision candidate: " << getLit(var) << " [" << assignedTo(var) << "] (" << q_level[Lit(var)>>1] << ") " << q_decision << std::endl;
+#endif
+				  
+				  // "var" currently undefined?
+				  if (!m_assignment[var] && !m_assignment[var ^ 1])
+					{
+					  
+					  // Increment "m_decisions".
+					  ++m_decisions;
+					  if( m_decHeu == 3 )
+						{ ++m_recalcDecHeu; }
+					  
+					  // Select the polarity according to "m_cache".
+					  if (m_cache[var >> 1])
+						{ var = var ^ 1; }
+
+					  // Push "var" as a decision onto the decision stack.
+					  addDecision(var); 
+
+					  // Everything went fine.
+					  return true;
+					}
+				}
+			}
+		  else if ( m_decHeu == 1 )
+			{
+			  // Do we have another variable within "q_varOrder"?
+
+			  while (!q_varOrder2[q_decision]->empty())
+				{
+				  // Get the variable with the maximum activity.
+				  unsigned int var(( q_varOrder2[q_decision]->top() << 1)^m_decVarSign);
+			  
+#ifdef EXDEBUG
+				  std::cout << "next decision candidate: " << getLit(var) << " [" << assignedTo(var) << "]" << std::endl;
+#endif
+				  
+				  // "var" currently undefined?
+				  if (!m_assignment[var] && !m_assignment[var ^ 1])
+					{
+					  
+					  // Increment "m_decisions".
+					  ++m_decisions;
+					  
+					  // Select the polarity according to "m_cache".
+					  var = var ^ m_cache[var >> 1];
+
+					  // Push "var" as a decision onto the decision stack.
+					  addDecision(var); 
+
+					  // Everything went fine.
+					  return true;
+					}
+				}
+			}
+		  else if (m_decHeu == 2 )
+			{
+			  unsigned int var(calcDecision(q_decision));
+			  while (var != 0 )
+				{
+#ifdef EXDEBUG
+				  std::cout << "next decision candidate: " << getLit(var) << " [" << assignedTo(var) << "]" << std::endl;
+#endif
+				  
+				  // "var" currently undefined?
+				  assert(!m_assignment[var] && !m_assignment[var ^ 1]);
+					  
+				  // Increment "m_decisions".
+				  ++m_decisions;
+				  
+				  // Select the polarity according to "m_cache".
+				  if (m_cache[var >> 1])
+					{ var = var ^ 1; }
+				  
+				  // Push "var" as a decision onto the decision stack.
+				  addDecision(var); 
+				  
+				  // Everything went fine.
+				  return true;
+				}
+			}
+		  
+		  // At this point all variables on current quant level are defined -> goto next quantlevel
+		  ++q_decision;
+
+#ifdef COMBSOLVER
+		  // switch if the outermost quantlevel is proceed
+		  if( e_toggleexport && e_switching < 0 && (int)q_decision <= 2 )
+			{ 
+			  e_nowexport = true;
+			  return true;
+			}
+#endif
+		}
+  
+      // At this point, there's no variable left to serve as a decision variable.
+      return false;
+    }
+
+
+	// Backtracks to decision level "bL". 
+	void backtrack (unsigned int bL)
+	{
+#ifdef ANADEBUG
+	  std::cout << __func__ << " bL: " << bL << " decisionlevel: " << m_decisionLevel << std::endl;
+#endif
+
+	  m_avgGlobalBTlevel += (m_decisionLevel-bL);
+	  m_avgLocalBTlevel += (m_decisionLevel-bL);
+
+	  ++m_innercounter;
+
+	  // "bL" has to be less than the current decision level.
+	  assert(bL < m_decisionLevel);
+
+	  // Decrement "m_dsEndIndex".
+	  --m_dsEndIndex;
+
+	  // Initialization.
+	  unsigned int lit(m_decisionStack[m_dsEndIndex]);
+	  unsigned int index(Lit(lit) >> 1); 
+	  unsigned int level(m_decisionLevel);
+	  bool lastredo(false);
+
+	  while( isDC(lit) )
+		{ 
+#ifdef EXDEBUG
+		  std::cout << "reset dc-status: " << getLit(lit) << " mlevel: " << m_level[index] << " qreason: " << q_reason[index] << " -> ";
+#endif
+		  resetDC(lit);
+#ifdef EXDEBUG
+		  std::cout << q_reason[index] << std::endl;
+#endif
+		  lit =  m_decisionStack[--m_dsEndIndex];
+		  index = Lit(lit) >> 1;
+		  level = m_level[index];
+		}
+
+	  assert( level == m_level[index] );
+
+	  // Undo all variable assignments on decision levels higher than "bL".
+	  // This loop assumes that we have a dummy assignment at the first 
+	  // position of the decision stack, which has been assigned on decision level 0. 
+	  while ( level > bL )
+		{ 
+
+		  if( isDecision(lit) && m_level[index] == (bL+1) )
+			{ lastredo = true; }
+#ifdef DEBUG
+		  std::cout << "redo assignment: " << getLit(lit) << " (" << m_level[index] << ") qr:" << q_reason[index] << std::endl;
+#endif
+		  //do we reach a decision on a fewer q_level?
+		  if( ( m_forcing[index] == NULL && m_binForcing[index] == 0) && (q_level[index]-1 < q_decision) )
+			{ 
+			  q_decision = q_level[index]-1; 
+#ifdef DEBUG
+			  std::cout << "new q_level: " << q_decision << std::endl;
+#endif
+			}
+
+		  // Cache the variable's current truth value.
+
+		  assert( index != 0 );
+		  m_cache[index] = lit & 1;
+
+
+		  // Add the current index to "q_varOrder".
+		  switch(m_decHeu)
+			{
+			case 0:
+			  if (!q_varOrder[q_level[index]-1]->inHeap(index))
+				{ q_varOrder[q_level[index]-1]->insert(index); }
+			  break;
+			case 1:
+			  if (!q_varOrder2[q_level[index]-1]->inHeap(index))
+				{ q_varOrder2[q_level[index]-1]->insert(index); }
+			  break;
+			case 3:
+			  if (!q_varOrder[q_level[index]-1]->inHeap(index))
+				{ q_varOrder[q_level[index]-1]->insert(index); }
+			default:
+			  break;
+			}
+	  
+		  // Undo the current assignment.
+		  m_assignment[Lit(lit)] = false;
+
+		  // Reset Level
+		  m_level[index] = 0;
+		  m_forcing[index] = NULL;
+		  m_binForcing[index] = 0;
+		  unsetReason(lit); 
+			  
+		  // Get the next assignment to be undone.
+		  lit = m_decisionStack[--m_dsEndIndex];
+		  index = Lit(lit) >> 1;
+		  level = m_level[index];
+
+		  while( isDC(lit) && !lastredo )
+			{ 
+#ifdef EXDEBUG
+			  std::cout << "reset dc-status: " << getLit(lit) << " mlevel: " << m_level[index] << " qreason: " << q_reason[index] << std::endl;
+#endif
+			  resetDC(lit);
+			  lit =  m_decisionStack[--m_dsEndIndex];
+			  index = Lit(lit) >> 1;
+			  level = m_level[index];
+			  m_forcing[index] = NULL;
+			  m_binForcing[index] = 0;
+			}
+		}
+
+	  // Increment "m_dsEndIndex".
+	  ++m_dsEndIndex;
+      
+	  // Update "m_decisionLevel".
+	  m_decisionLevel = bL;
+    
+	  // Update "m_dsImplIndex".
+	  m_dsImplIndex = m_dsEndIndex;
+
+	  return;
+	} 
+
+	void resetHeu (void)
+	{
+	  //#ifdef DEBUG
+	  std::cout << __func__ << std::endl
+				<< "declevel: " << m_decisionLevel << " rootlevel: " << m_rootLevel << std::endl;
+	  
+	  //#endif
+
+	  assert( m_decisionLevel == m_rootLevel );
+
+	  //#ifdef DEBUG
+	  std::cout << " m_cacheswap= " << m_cacheswap 
+				<< " q_slbd= " << q_slbd 
+				<< " m_decHeu= " << m_decHeu 
+				<< " m_restartHeu= " << m_restartHeu << std::endl;
+	  //#endif
+
+	  unsigned int cacheSwap = rand() % 2;
+	  unsigned int slbd = rand() % 3;
+	  unsigned int decHeu = rand() % 4;
+	  unsigned int restartHeu = (rand() % 3)+1;
+
+	  // Set the "Simplify LBD" mode to "slbd".
+	  setSimplifyLBD(slbd); 
+
+	  // Set the "Decision Heuristic" to "decHeu".
+	  setDecHeu(decHeu); 
+  
+	  // Set the "Restart Heuristic" to "restartHeu".
+	  setRestartHeu(restartHeu); 
+
+	  // Set the "Cache Swap" to "cacheSwap".
+	  setCacheSwap(cacheSwap); 
+
+	  //#ifdef DEBUG
+	  std::cout << " m_cacheswap= " << m_cacheswap 
+				<< " q_slbd= " << q_slbd 
+				<< " m_decHeu= " << m_decHeu 
+				<< " m_restartHeu= " << m_restartHeu << std::endl;
+	  //#endif
+
+	  // reinitialize decision heuristic
+	  if( decHeu == 3 )
+		{ calcDecisionQuBE(); }
+	}
+
+	unsigned int checkBinWatches( std::vector<unsigned int>& binwatches )
+	{
+	  unsigned int removed(0);
+
+	  unsigned int pSize((unsigned int)binwatches.size()); 
+
+	  for (unsigned int p = 0; p < pSize; ++p)
+		{ 
+		  unsigned int lit = Lit(binwatches[p]);
+		  if (m_assignment[lit] && m_level[lit >> 1] == 0)
+			{ 
+#ifdef DEBUG
+			  std::cout << "remove org p: " << getLit(lit<<1) << " [" << assignedTo(lit<<1) << "] " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+			  --pSize; 
+			  binwatches[p] = binwatches[pSize]; 
+			  binwatches.pop_back(); 
+			  --p; 
+			  ++removed;
+			}
+		}
+	  return removed;
+	}
+
+	bool inClause( pointToClause* ptc, unsigned int lit )
+	{
+	  unsigned int pos(0);
+	  while( ptc->clause()[pos] != 0 )
+		{
+		  if( ptc->clause()[pos] == lit )
+			{ return true; }
+		  ++pos;
+		}
+	  return false;
+	}
+
+	// Simplifies the clause database by removing
+	// -- clauses satisfied due to an assignment made on decision level 0,
+	// -- literals evaluating to false due to an assignment made on decision level 0,
+	// -- conflict clauses with a high "Literals Blocks Distance".
+	// Returns false if formula is unsatisfiable, otherwise true
+	bool simplify ( bool deletelearned = true )
+	{
+#ifdef OUTPUT
+	  std::cout << "S";
+#else 
+#ifdef STATS
+	  std::cout << "S";
+#endif
+#endif
+
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+	  printdatabase(true);
+#endif
+
+	  if(q_skiplearning)
+		{ q_togglelearning ^= true; }
+	  
+
+	  // Increment "m_simplifications".
+	  ++m_simplifications;
+
+#ifdef OUTPUT
+	  unsigned int staticbegin(m_clausesStatic);
+	  unsigned int dynamicbegin(m_clausesDynamic);
+#endif
+
+	  m_clausesStaticBinary = 0;
+	  m_clausesDynamicBinary = 0;
+
+	  // every clause/term with (lbd > delValue) will be deleted
+	  unsigned int delValue(2);
+
+#ifdef DEBUG
+	  std::cout << "check binary clauses" << std::endl;
+#endif
+
+	  // Update "m_binWatches" / "m_watches".
+	  for (unsigned int v = 1; v <= m_variables; ++v)
+		{
+		  // is assigned in level 0 -> delete binwatches
+		  if ( ( m_level[v] == 0 ) && (m_assignment[v<<1] || m_assignment[(v<<1)^1]) /*&& !q_keeplit[v]*/ )
+			{
+#ifdef DEBUG
+			  std::cout << "delete all binwatches of: " << v << " [" << assignedTo(v<<1) << "] mlevel: " << m_level[v] << std::endl;
+#endif
+			  m_binWatches[v<<1].clear();
+			  m_binWatches[(v<<1)^1].clear();
+			  m_binWatchesLearnedIndex[v<<1] = 0;
+			  m_binWatchesLearnedIndex[(v<<1)^1] = 0;
+			}
+		  // "v" not assigned on decision level 0?
+		  else if ( m_level[v] != 0 || ( !m_assignment[v<<1] && !m_assignment[(v<<1)^1]) )
+			{
+			  // Check whether "m_binWatches[v << 1]" contains variables assigned on decision level 0.
+			  std::vector<unsigned int>& pWatches(m_binWatches[v << 1]); 
+			  unsigned int pSize((unsigned int)pWatches.size()); 
+			  for (unsigned int p = 0; p < pSize; ++p)
+				{ 
+				  unsigned int lit = Lit(pWatches[p]);
+				  if (m_assignment[lit] && ( m_level[lit >> 1] == 0 ) /*&& !q_keeplit[lit>>1]*/ )
+					{ 
+#ifdef DEBUG
+					  std::cout << "remove p: " << getLit(v<<1) << " [" << assignedTo(v<<1) << "] " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+					  //pWatches[p] = pWatches[--pSize]; 
+					  if( p < m_binWatchesLearnedIndex[v<<1] )
+						{
+						  --m_binWatchesLearnedIndex[v<<1];
+						  pWatches[p] = pWatches[m_binWatchesLearnedIndex[v<<1]];
+						  pWatches[m_binWatchesLearnedIndex[v<<1]] = pWatches[--pSize];
+						}
+					  else
+						{
+						  pWatches[p] = pWatches[--pSize]; 
+						}
+					  pWatches.pop_back(); 
+					  --p; 
+
+					}
+				}
+
+			  // Check whether "m_binWatches[(v << 1) ^ 1]" contains variables assigned on decision level 0.
+			  std::vector<unsigned int>& nWatches(m_binWatches[(v << 1) ^ 1]); 
+			  unsigned int nSize((unsigned int)nWatches.size()); 
+			  for (unsigned int n = 0; n < nSize; ++n)
+				{ 
+				  unsigned int lit = Lit(nWatches[n]);
+				  if (m_assignment[lit] && ( m_level[lit >> 1] == 0 ) /*&& !q_keeplit[lit>>1]*/ )
+					{ 
+#ifdef DEBUG
+					  std::cout << "remove n: " << getLit((v<<1)^1) << " [" << assignedTo((v<<1)^1) << "] " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+					  //nWatches[n] = nWatches[--nSize]; 
+					  if( n < m_binWatchesLearnedIndex[(v<<1)^1] )
+						{
+						  --m_binWatchesLearnedIndex[(v<<1)^1];
+						  nWatches[n] = nWatches[m_binWatchesLearnedIndex[(v<<1)^1]];
+						  nWatches[m_binWatchesLearnedIndex[(v<<1)^1]] = nWatches[--nSize];
+						}
+					  else
+						{
+						  nWatches[n] = nWatches[--nSize]; 
+						}
+					  nWatches.pop_back(); 
+					  --n;
+					}
+				}
+			}
+
+		  m_clausesStaticBinary += m_binWatchesLearnedIndex[v<<1] + m_binWatchesLearnedIndex[(v<<1)^1];
+		  m_clausesDynamicBinary += (m_binWatches[v<<1].size()-m_binWatchesLearnedIndex[v<<1]) + (m_binWatches[(v<<1)^1].size()-m_binWatchesLearnedIndex[(v<<1)^1]);
+
+		  // Clear watches.
+		  std::vector< pointToClause* >().swap(m_watches[v << 1]); 
+		  std::vector< pointToClause* >().swap(m_watches[(v << 1) ^ 1]); 
+
+		  std::vector< pointToClause* >().swap(m_learnedWatches[v << 1]); 
+		  std::vector< pointToClause* >().swap(m_learnedWatches[(v << 1) ^ 1]); 
+		}
+
+	  m_clausesStaticBinary >>= 1;
+	  m_clausesDynamicBinary >>= 1;
+	
+	  // Initialization.
+	  unsigned int size((unsigned int)m_clauseDatabase.size());
+
+#ifdef DEBUG
+	  std::cout << "check nary clauses" << std::endl;
+#endif
+	
+	  // Update "candidates".
+	  for (unsigned int c = 0; c < size; ++c)
+		{
+		  // Get a pointer to the next clause.
+		  unsigned int* clause(m_clauseDatabase[c]->clause());
+
+		  unsigned int wl0 = m_clauseDatabase[c]->wl0;
+		  unsigned int wl1 = m_clauseDatabase[c]->wl1;
+
+#ifdef DEBUG
+		  std::cout << std::endl;
+		  printClause(m_clauseDatabase[c]);
+#endif
+		  // "clause" currently forcing an implication?
+		  if ( ( m_forcing[wl0>>1] != clause && m_forcing[wl1>>1] != clause ) ||
+			   ( m_level[wl0 >> 1] == 0 && m_assignment[wl0] ) ||
+			   ( m_level[wl1 >> 1] == 0 && m_assignment[wl1] ) )
+			{
+			  // If "clause" is not forcing an implication, we can delete it without running into problems.
+	
+			  // Initialization.
+			  unsigned int p(0);
+			  unsigned int q(0);
+			  unsigned int maxelevel(0);
+
+			  // Check whether "clause" is satisfied by an assignment made on decision level 0 or 
+			  // if it contains literals evaluating to false due to an assignment made on decision level 0.
+			  while (clause[p] != 0)
+				{
+				  unsigned int lit = Lit(clause[p]);
+				  // Current literal unassigned or assigned on a decision level greater 0?
+				  // Skip universal literals an larger quant level than maximum exist level
+				  if ( ( (!m_assignment[lit] && !m_assignment[lit^1]) || 
+						 ( m_level[lit >> 1] > 0 ) ) &&
+					   ( !isUniversal(clause[p]) || (q_level[lit>>1] < maxelevel ) )
+					   )
+					{
+					  // At this point, we have to keep the current literal.
+					  clause[q++] = clause[p];
+
+					  if( !isUniversal(clause[p]) && ( maxelevel < q_level[lit>>1] ) )
+						{ maxelevel = q_level[lit>>1]; }
+					}
+				  else /*if( !q_keeplit[lit>>1] )*/
+					{
+					  // Remove lit
+					  if( !m_clauseDatabase[c]->isLearned() )
+						{ 
+#ifdef DEBUG						  
+						  std::cout << "remove " << getLit(clause[p]) << std::endl; 
+#endif
+						  removeFromOccurenceList( clause[p], m_clauseDatabase[c]); 
+						}
+					  // Keep pure lits in learned clauses
+					  else if ( isPure(clause[p]) )
+						{
+						  clause[q++] = clause[p]; 
+						  
+						  if( !isUniversal(clause[p]) && ( maxelevel < q_level[lit>>1] ) )
+							{ maxelevel = q_level[lit>>1]; }
+#ifdef EXDEBUG
+						  std::cout << "keep pure literal in learned clause: " << getLit(clause[p]) << std::endl;
+#endif
+						}
+					}
+
+				  // "clause" satisfied by an assignment made on decision level 0?
+				  if (m_assignment[lit] && ( m_level[lit >> 1] == 0) /*&& !q_keeplit[lit>>1]*/ )
+					{
+#ifdef EXDEBUG
+					  std::cout << getLit(clause[p]) << " satiesfied on dL 0" << std::endl;
+#endif
+					  // At this point, we can delete the current clause.
+					  break; 
+					}
+
+				  // Increment "p".
+				  ++p;
+				}
+
+			  // Have we reached the clause stopper?
+			  if (clause[p] == 0)
+				{ 
+				  unsigned int size = q;
+				  clause[size] = 0;
+				  unsigned int esize = sortClauseEU( clause, size, maxelevel );
+				  m_clauseDatabase[c]->setSize(size);
+				  m_clauseDatabase[c]->setFAQ(esize);
+				  clause[size] = 0;
+				  
+				  // Empty clause through forallreduction?
+				  if ( size == 0 )
+					{ return false; }
+				  // Unit clause?
+				  else if (size == 1)
+					{
+					  if( m_assignment[Lit(clause[0])^1] || isUniversal(clause[0]) )
+						{ return false; }
+
+					  if( !m_assignment[Lit(clause[0])] )
+						{ 
+						  if( m_decisionLevel > q_backtracklevel )
+							{ backtrack(q_backtracklevel); }
+						  setUnit(clause[0]);
+						  addImplication( clause[0], NULL );
+						  m_clauseDatabase[c]->setLBD(0);
+						}
+					}
+				  // Do we have a binary clause?
+				  else if (size == 2)
+					{
+
+					  bool isLearned = (m_clauseDatabase[c]->lbd() > 1);
+					  if( isLearned )
+						{ ++m_clausesDynamicBinary; }
+					  else
+						{ ++m_clausesStaticBinary; }
+
+					  // Mark the current clause as "to be deleted", since we store binary clauses separately.
+					  m_clauseDatabase[c]->setLBD(0);
+					  addBinary(clause[0], clause[1], isLearned);
+					  
+					}
+				  else if ( m_clauseDatabase[c]->lbd() > size )
+					{ m_clauseDatabase[c]->setLBD(size); }
+				}
+			  else
+				{
+				  // Current clause satisfied by an assignment made on decision level 0, 
+				  // so let's mark it as "to be deleted".
+#ifdef EXDEBUG
+				  std::cout << "clause satiesfied on dL 0, mark for remove" << std::endl;
+				  printClause(m_clauseDatabase[c]);
+#endif
+
+				  if( m_clauseDatabase[c]->isLearned() )
+					{
+					  m_tlbd -= m_clauseDatabase[c]->lbd();
+					}
+
+				  m_clauseDatabase[c]->setLBD(0);
+				}
+
+			  // "clause" neither part of the original CNF formula nor binary?
+			  if ( deletelearned && (q_slbd != 0) && m_clauseDatabase[c]->lbd() > delValue && q > 2)
+				{ 
+#ifdef EXDEBUG
+				  std::cout << "mark learned clause as deletion candidate" << std::endl;
+				  printClause(m_clauseDatabase[c]);
+#endif
+				  m_candidates.push_back(m_clauseDatabase[c]); 
+				}
+			}
+		}
+
+
+	  if( m_ccs == 2 )
+		{
+		  // Sort "candidates" by increasing "Resolution Steps" values.
+		  std::sort(m_candidates.begin(), m_candidates.end(), compareStepsReverse);
+		  assert(m_candidates.empty() || (*m_candidates[0]).steps() >= (*m_candidates.back()).steps());
+		}
+	  else if( m_ccs == 1 )
+		{
+		  // Sort "candidates" by decreasing "Literals Blocks Distance" values.
+		  std::sort(m_candidates.begin(), m_candidates.end(), compareLBD);
+		  assert(m_candidates.empty() || (*m_candidates[0]).lbd() <= (*m_candidates.back()).lbd());
+		}
+
+	  // Resize "candidates".
+	  m_candidates.resize(m_candidates.size() >> 1 );
+
+	  std::vector<unsigned int> watchcandidate;
+
+	  // Mark all candidates as "to be deleted" by setting the corresponding "Literals Blocks Distance" values to 0.
+	  while( !m_candidates.empty())
+		{ 
+		  if( m_candidates.back()->lbd() > 1 )
+			{
+			  m_tlbd -= m_candidates.back()->lbd();
+			}
+#ifdef EXDEBUG
+		  std::cout << m_candidates.back()->lbd() << " " << m_candidates.back()->steps() << std::endl;
+#endif
+		  m_candidates.back()->setLBD(0); 
+		  m_candidates.pop_back();
+		}
+
+	  m_clausesBinary = m_clausesStaticBinary + m_clausesDynamicBinary;
+	  m_clausesStatic = m_clausesStaticBinary;
+	  m_clausesDynamic = m_clausesDynamicBinary;
+
+	  // Remove all clauses marked as "to be deleted" from the clause database. By the way, update "m_watches".
+	  for (unsigned int c = 0; c < size; ++c)
+		{
+		  // What about the LBD value of the current clause?
+		  if ( m_clauseDatabase[c]->isDeleted() )
+			{	 
+#ifdef DEBUG
+			  std::cout << "remove clause " << std::endl;
+			  printClause(m_clauseDatabase[c]);
+#endif
+
+			  deleteClause(c,size,watchcandidate); 
+			}
+		  else
+			{
+			  // Update "m_watches".
+			  pointToClause* clause(m_clauseDatabase[c]);
+
+			  recalcFaq(clause);
+
+			  if( m_clauseDatabase[c]->lbd() > 1 )
+				{
+#ifdef DEBUG
+				  std::cout << "learned clause" << std::endl;
+				  printClause(clause);
+#endif
+				  ++m_clausesDynamic;
+
+				  // Nasty workaround ... TODO
+				  if( !inClause( clause, clause->wl0 ) )
+					{ clause->wl0 = clause->clause()[0]; }
+				  //assert( inClause( m_clauseDatabase[c], clause->wl0 ) ) ;
+				  m_learnedWatches[Lit(clause->wl0)].push_back(clause);
+
+				  if( clause->faq() != 1 )
+					{ 
+					  // Nasty workaround ... TODO
+					  if( !inClause( m_clauseDatabase[c], clause->wl1 ) )
+						{ clause->wl1 = clause->clause()[1]; }
+					  //assert( inClause( m_clauseDatabase[c], clause->wl1 ) ) ;
+					  m_learnedWatches[Lit(clause->wl1)].push_back(clause); 
+					}
+				  else
+					{ clause->wl1 = 0; }
+				  
+				  if( clause->clause()[clause->faq()] != 0 )
+					{ 
+					  // Nasty workaround ... TODO
+					  if( !inClause( m_clauseDatabase[c], clause->wla ) )
+						{ clause->wla = clause->clause()[clause->faq()]; }
+					  //assert( inClause( m_clauseDatabase[c], clause->wla ) ) ;
+					  m_learnedWatches[Lit(clause->wla)].push_back(clause);
+					}
+				  else
+					{ clause->wla = 0; }
+				}
+			  else
+				{
+#ifdef DEBUG
+				  std::cout << "original clause" << std::endl;
+				  printClause(clause);
+#endif
+
+				  ++m_clausesStatic;
+
+				  // Nasty workaround ... TODO
+				  if( !inClause( clause, clause->wl0 ) )
+					{ clause->wl0 = clause->clause()[0]; }
+				  //assert( inClause( m_clauseDatabase[c], clause->wl0 ) ) ;
+				  m_watches[Lit(clause->wl0)].push_back(clause);
+				  
+				  if( clause->faq() != 1 )
+					{ 
+					  // Nasty workaround ... TODO
+					  if( !inClause( m_clauseDatabase[c], clause->wl1 ) )
+						{ clause->wl1 = clause->clause()[1]; }
+					  //assert( inClause( m_clauseDatabase[c], clause->wl1 ) ) ;
+					  m_watches[Lit(clause->wl1)].push_back(clause); 
+					}
+				  else{ clause->wl1 = 0; }
+				  
+				  if( clause->clause()[clause->faq()] != 0 )
+					{ 
+					  // Nasty workaround ... TODO
+					  if( !inClause( m_clauseDatabase[c], clause->wla ) )
+						{ clause->wla = clause->clause()[clause->faq()]; }
+					  //assert( inClause( m_clauseDatabase[c], clause->wl0 ) ) ;
+					  m_watches[Lit(clause->wla)].push_back(clause); 
+					}
+				  else{ clause->wla = 0; }
+				}
+			}
+		}
+
+	  m_clauses = m_clausesStatic + m_clausesDynamic;
+
+	  /* update litlists */
+	  updateLitLists( watchcandidate );
+
+#ifdef OUTPUT
+	  std::cout << (staticbegin-m_clausesStatic) << "," << (dynamicbegin-m_clausesDynamic);
+#else 
+#ifdef STATS
+	  std::cout << (staticbegin-m_clausesStatic) << "," << (dynamicbegin-m_clausesDynamic);
+#endif
+#endif
+
+#ifdef EXDEBUG
+	  printdatabase();
+#endif
+
+#ifdef EXDEBUG
+	  printdatabase(true);
+#endif
+
+	  return true;
+	}
+
+	// Simplifies the cube database by removing
+	// -- cubes satisfied due to an assignment made on decision level 0,
+	// -- literals evaluating to false due to an assignment made on decision level 0,
+	// -- learned cubes with a high "Literals Blocks Distance".
+	// Returns false if formulas is satisfiable, otherwise false
+	bool simplifyCube (void)
+	{
+#ifdef OUTPUT
+	  std::cout << "SC";
+	  unsigned int cubebegin( m_cubes );
+#else 
+#ifdef STATS
+	  std::cout << "SC";
+	  unsigned int cubebegin( m_cubes );
+#endif
+#endif
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  // Increment "q_simplifications".
+	  ++q_simplifications;
+
+	  // every clause/term with (lbd > delValue) will be deleted
+	  unsigned int delValue(1000);
+
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  std::vector< pointToClause* >().swap(q_cubeWatches[v << 1]); 
+		  std::vector< pointToClause* >().swap(q_cubeWatches[(v << 1) ^ 1]); 
+		}
+
+	  // Initialization.
+	  unsigned int size((unsigned int)q_solutionDatabase.size());
+
+	  // Update "candidates".
+	  for (unsigned int c = 0; c < size; ++c)
+		{
+		  unsigned int wl0 = q_solutionDatabase[c]->wl0;
+		  unsigned int wl1 = q_solutionDatabase[c]->wl1;
+
+		  // Get a pointer to the next clause.
+		  unsigned int* cube(q_solutionDatabase[c]->clause());
+
+#ifdef DEBUG
+		  std::cout << std::endl;
+		  printClause(cube);
+		  std::cout << std::endl;
+#endif
+		  // "cube" currently forcing an implication or assigned on decision level 0?
+		  if ( ( m_forcing[Lit(wl0)>>1] != cube ) ||
+			   ( m_level[Lit(wl0) >> 1] == 0 && m_assignment[Lit(wl0)] ) ||
+			   ( m_level[Lit(wl1) >> 1] == 0 && m_assignment[Lit(wl1)] ) 			   
+			   )
+			{
+			  // If "cube" is not forcing an implication, we can delete it without running into problems.
+
+			  // Initialization.
+			  unsigned int p(0);
+			  unsigned int q(0);
+			  unsigned int maxulevel(0);
+
+			  // Check whether "cube" is satisfied by an assignment made on decision level 0 or 
+			  // if it contains literals evaluating to false due to an assignment made on decision level 0.
+			  while (cube[p] != 0)
+				{
+				  // Current literal unassigned or assigned on a decision level greater 0?
+				  if ( ( (!m_assignment[Lit(cube[p])] && !m_assignment[Lit(cube[p]) ^ 1]) ||
+						 m_level[Lit(cube[p]) >> 1] > 0 ) &&
+					   ( isUniversal(cube[p]) || (q_level[Lit(cube[p])>>1] < maxulevel ) )
+					   )
+					{
+					  // At this point, we have to keep the current literal.
+					  cube[q++] = cube[p]; 
+
+					  if( isUniversal(cube[p]) && ( maxulevel < q_level[Lit(cube[p])>>1] ) )
+						{ maxulevel = q_level[Lit(cube[p])>>1]; }
+					}
+				  // keep pure literals in learned cubes
+				  // we would run into troubles if we would keep it
+				  else if( isPure(cube[p]) )
+					{ 
+					  cube[q++] = cube[p]; 
+
+					  if( isUniversal(cube[p]) && ( maxulevel < q_level[Lit(cube[p])>>1] ) )
+						{ maxulevel = q_level[Lit(cube[p])>>1]; }
+#ifdef EXDEBUG
+					  std::cout << "keep pure literal in learned cube: " << getLit(cube[p]) << std::endl;
+#endif
+					}
+#ifdef DEBUG
+				  else
+					{ std::cout << "remove " << getLit(cube[p]) << std::endl; }
+#endif
+
+				  // "cube" satisfied by an assignment made on decision level 0?
+				  if (m_assignment[Lit(cube[p])] && m_level[Lit(cube[p]) >> 1] == 0)
+					{
+#ifdef EXDEBUG
+					  std::cout << getLit(cube[p]) << " satiesfied on dL 0" << std::endl;
+#endif
+					  // At this point, we can delete the current clause.
+					  break; 
+					}
+
+				  // Increment "p".
+				  ++p;
+				}
+
+			  // Have we reached the cube stopper?
+			  if (cube[p] == 0)
+				{ 				
+				  unsigned int size = q;
+				  cube[size] = 0;
+				  unsigned int usize = sortCubeUE( cube, size, maxulevel );
+				  q_solutionDatabase[c]->setSize(size);
+				  q_solutionDatabase[c]->setSteps(usize);
+				  q_solutionDatabase[c]->setFAQ(usize);
+				  cube[size] = 0;
+
+#ifdef DEBUG
+				  std::cout << "cube after reduction: ";
+				  printClause(q_solutionDatabase[c]);
+#endif
+
+				  // Received empty cube?
+				  if( size == 0 )
+					{
+					  return false;
+					}
+				  // New implication?
+				  else if ( size == 1 )
+					{
+					  if( !isUniversal(cube[0]) || m_assignment[Lit(cube[0])^1] )
+						{ return false; }
+					  
+					  if( !m_assignment[Lit(cube[0])] )
+						{ 
+						  if( m_decisionLevel > q_backtracklevel )
+							{ backtrack(q_backtracklevel); }
+						  setUnit(cube[0]);
+						  addImplication(cube[0], NULL); 
+						}
+
+					  q_solutionDatabase[c]->setLBD(0);
+					}
+				  else if ( q_solutionDatabase[c]->lbd() > size )
+					{ q_solutionDatabase[c]->setLBD(size); }
+				}
+			  else
+				{
+				  // Current cube satisfied by an assignment made on decision level 0, 
+				  // so let's mark it as "to be deleted".
+#ifdef EXDEBUG
+				  std::cout << "cube satiesfied on dL 0" << std::endl;
+				  printClause(q_solutionDatabase[c]);
+#endif
+				  m_ttlbd -= q_solutionDatabase[c]->lbd(); 
+				  q_solutionDatabase[c]->setLBD(0);
+				  continue;
+				}
+
+			  // "clause" neither part of the original CNF formula nor binary?
+			  if ( (q_slbd != 0) && q_solutionDatabase[c]->lbd() > delValue )
+				{ 
+#ifdef EXDEBUG
+				  std::cout << "mark cube as deletion candidate" << std::endl;
+#endif
+				  m_candidates.push_back(q_solutionDatabase[c]); 
+				}
+			}
+		}
+
+	  // Sort "candidates" by increasing number of universal literals (which is stored in the resolution steps value).
+	  std::sort(m_candidates.begin(), m_candidates.end(), compareSteps);
+	  
+	  
+      // Resize "candidates".
+	  m_candidates.resize( m_candidates.size() >> 1 );
+
+      // Mark all candidates as "to be deleted" by setting 
+      // the corresponding "Literals Blocks Distance" values to 0.
+	  while( !m_candidates.empty() )
+		{ 
+#ifdef EXDEBUG
+		  std::cout << "CUBE " << m_candidates.back()->lbd() << " " << m_candidates.back()->steps() << std::endl;
+		  printClause(m_candidates.back());
+#endif
+		  m_ttlbd -= m_candidates.back()->lbd(); 
+		  m_candidates.back()->setLBD(0); 
+		  m_candidates.pop_back();
+		}
+
+	  assert(m_candidates.empty() || (*m_candidates[0]).steps() <= (*m_candidates.back()).steps());
+
+	  m_cubes = 0;
+   
+	  // Remove all cubes marked as "to be deleted" from the clause database. By the way, update "m_watches".
+	  for (unsigned int c = 0; c < size; ++c)
+		{
+
+#ifdef DEBUG
+		  printClause(q_solutionDatabase[c]);
+#endif
+
+		  // What about the LBD value of the current cube?
+		  if (q_solutionDatabase[c]->lbd() == 0)
+			{	 
+#ifdef DEBUG
+			  std::cout << "remove cube" << std::endl;
+#endif
+			  // Current cube has been marked as "to be deleted", so let's remove it from the solution database.
+			  m_openIDs.push_back(q_solutionDatabase[c]->id());
+			  delete q_solutionDatabase[c];
+			  q_solutionDatabase[c--] = q_solutionDatabase[--size];
+			  q_solutionDatabase.pop_back();
+			}
+		  else
+			{
+			  ++m_cubes;
+			  // Update "m_watches".
+			  pointToClause* cube(q_solutionDatabase[c]);
+			  
+			  recalcFaq(cube, true);
+
+			  // Nast workaround... TODO
+			  if( !inClause( cube, cube->wl0 ) )
+				{ cube->wl0 = cube->clause()[0]; }
+
+			  q_cubeWatches[Lit(cube->wl0)].push_back(cube);
+
+			  if( cube->faq() != 1 )
+				{ 
+				  // Nast workaround... TODO
+				  if( !inClause( cube, cube->wl1 ) )
+					{ cube->wl1 = cube->clause()[1]; }
+				  q_cubeWatches[Lit(cube->wl1)].push_back(cube); 
+				}
+			  else 
+				{ cube->wl1 = 0; }
+
+			  if( cube->clause()[cube->faq()] != 0 )
+				{
+				  // Nast workaround... TODO
+				  if( !inClause( cube, cube->wla ) )
+					{ cube->wla = cube->clause()[cube->faq()]; }
+
+				  assert(cube->clause()[cube->faq()] != 0 );
+				  q_cubeWatches[Lit(cube->wla)].push_back(cube); 
+				}
+			  else 
+				{ cube->wla = 0; }
+			}
+		}    
+#ifdef OUTPUT
+	  std::cout << (cubebegin-m_cubes) << std::endl;
+#else 
+#ifdef STATS
+	  std::cout << (cubebegin-m_cubes) << std::endl;
+#endif
+#endif
+
+#ifdef EXDEBUG
+	  std::cout << "after simplify: " << std::endl;
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  if( m_forcing[v] != NULL && isUniversal(m_forcing[v][0]) )
+			{
+			  std::cout << v << " forced by cube: " << std::endl;
+			  printClause(m_forcing[v]);
+			  std::cout << std::endl;
+			}
+		}
+#endif
+
+#ifdef EXDEBUG
+	  printdatabase();
+#endif
+
+	  return true;
+	}
+
+	// this a q DLCS-like decision heuristic
+	// calculate next decision variable based on number of occurences in original formula
+	// returns the decision literal
+	// return 0 if all variables on "qlevel" are assigned
+	unsigned int calcDecision( int qlevel )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  unsigned int maxvalue(0);
+	  unsigned int declit(0);
+	  std::vector< std::pair<unsigned int, unsigned int> > values(q_litbylevel[qlevel].size() );
+
+	  for( unsigned int i=0 ; i != q_litbylevel[qlevel].size(); ++i )
+		{
+		  unsigned int lit(q_litbylevel[qlevel][i]);
+
+		  // skip assigned literals
+		  if( m_assignment[ Lit(lit) ] || m_assignment[ Lit(lit)^1 ] )
+			{ continue; }
+		  
+		  // proceed binclauses
+		  for( unsigned int j=0; j != m_binWatches[Lit(lit)].size(); ++j)
+			{
+			  // implication/satisfaction of a clause
+			  if( !m_assignment[Lit(m_binWatches[Lit(lit)][j])] )
+				{ ++values[i].first; }
+			}
+		  for( unsigned int j=0; j != m_binWatches[Lit(lit)^1].size(); ++j)
+			{
+			  // implication/satisfaction of a clause
+			  if( !m_assignment[Lit(m_binWatches[Lit(lit)^1][j])] )
+				{ ++values[i].second; }
+			}
+
+		  // now proceed nary-clauses
+		  for( unsigned int j=0; j!= q_occur[Lit(lit)].size(); ++j)
+			{
+			  // potentional implication/satisfaction of a clause
+			  if( !m_assignment[ q_occur[Lit(lit)][j]->wl0 ] && !m_assignment[ Lit(q_occur[Lit(lit)][j]->wla) ] )
+				{ ++values[i].first; }
+			}
+		  for( unsigned int j=0; j!= q_occur[Lit(lit)^1].size(); ++j)
+			{
+			  // potentional implication/satisfaction of a clause
+			  if( !m_assignment[ q_occur[Lit(lit)^1][j]->wl0 ] && !m_assignment[ Lit(q_occur[Lit(lit)^1][j]->wla) ] )
+				{ ++values[i].second; }
+			}
+
+		  if( m_weight[Lit(lit)>>1] != 1 )
+			{
+			  values[i].first = (unsigned int)((double)values[i].first*m_weight[Lit(lit)>>1]);
+			  values[i].second = (unsigned int)((double)values[i].first*m_weight[Lit(lit)>>1]);
+			}
+
+		  if ( maxvalue < values[i].first )
+			{ 
+			  declit = Lit(q_litbylevel[qlevel][i]); 
+			  maxvalue = values[i].first;
+			}
+
+		  if ( maxvalue < values[i].second )
+			{ 
+			  declit = Lit(q_litbylevel[qlevel][i]^1); 
+			  maxvalue = values[i].second;
+			}
+		}
+	  
+	  return declit;
+	}
+
+	// calculate desicion order in QuBE style
+	// activity of a literal is given by: max(positive occurence, negative occurence )
+	// updated after a certain number of decisions
+	void calcDecisionQuBE( void )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  for(unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  if( q_level[v] == 0 || q_deleted[v] ) { continue; }
+
+#ifdef EXDEBUG
+		  std::cout << "var: " << v << " pos act: " << m_activity3[v<<1] << " neg act: " << m_activity3[(v<<1)+1] << " -> ";
+#endif
+		 		  
+		  if( m_activity3[v<<1] > m_activity3[(v<<1)+1] )
+			{
+			  m_activity[v] = m_activity3[v<<1];
+			  if( m_cacheswap )
+				{ m_cache[v] = true; }
+			}
+		  else 
+			{
+			  m_activity[v] = m_activity3[(v<<1)+1];
+			  if( m_cacheswap )
+				{ m_cache[v] = false; }
+
+			}
+#ifdef EXDEBUG
+		  std::cout << " act: " << m_activity[v] << std::endl;
+		  std::cout << " q_level: " << (q_level[v]-1) << std::endl;
+#endif
+		  if (q_varOrder[q_level[v]-1]->inHeap(v))
+			{ q_varOrder[q_level[v]-1]->update(v); } 
+		}
+	}
+
+	// Increases the activity of variable "var".
+	void increaseActivityVSIDS (unsigned int var)
+	{
+	  if( m_decHeu != 0 ) { return; }
+
+	  // "var" has to be less or equal "m_variables".
+	  assert(var <= m_variables); 
+
+	  // Increase "var's" activity.
+	  m_activity[var] += m_incVarActivity; 
+
+	  // Update the position of "var" within the "q_varOrder".
+	  if (q_varOrder[q_level[var]-1]->inHeap(var))
+		{ q_varOrder[q_level[var]-1]->update(var); } 
+      
+	  // Do we have to "normalize" the variables' activities?
+	  if (m_activity[var] > 1e100)
+		{
+		  // Divide all activities by 1e100.
+		  for (unsigned int v = 1; v <= m_variables; ++v)
+			{ m_activity[v] *= 1e-100; }
+	  
+		  // Update "m_incVarActivity".
+		  m_incVarActivity *= m_varActMultiplier;
+		}
+	}
+	void increaseActivityDLCS (unsigned int var)
+	{
+	  if( m_decHeu != 1 ) {return;}
+	  // "var" has to be less or equal "m_variables".
+	  assert(var <= m_variables); 
+		  
+	  // Increase "var's" activity.
+	  ++m_activity2[var]; 
+		  
+	  // Update the position of "var" within the "q_varOrder".
+	  if (q_varOrder2[q_level[var]-1]->inHeap(var))
+		{ q_varOrder2[q_level[var]-1]->update(var); } 
+	}
+
+	void increaseActivityQuBE (unsigned int lit)
+	{
+	  if( m_decHeu != 3 ) {return;}
+	  // "var" has to be less or equal "m_variables".
+	  assert( lit <= ( (m_variables<<1)+2) ); 
+		  
+	  // Increase "var's" activity.
+	  ++m_activity3[lit];
+	}
+
+	// Returns the i.th element of the "Luby sequence". See "Optimal Speedup 
+	// of Las Vegas Algorithms" (Luby, Sinclair, and Zuckerman) for more details.
+	unsigned int luby (unsigned int i) const
+	{
+	  // By definition, "i" has to be greater than 0.
+	  assert(i > 0);
+      
+	  // Variables.
+	  unsigned int p(2); 
+	  unsigned int iP1(i + 1); 
+      
+	  // Calculate the i.th element of the Luby sequence.
+	  while (p < iP1) 
+		{ p = p << 1; }
+      
+	  // Return the i.th element.
+	  if (p == iP1)
+		{ return (p >> 1); }
+	  return luby(i - (p >> 1) + 1);
+	}
+
+    // generates model of the outermost existential level (if existing)
+    void generateModel ( void )
+    {
+#ifdef DEBUG
+      std::cout << __func__ << std::endl;
+#endif
+      // Clear "m_model".
+      for (unsigned int v = 1; v <= m_variables; ++v)
+		{ m_model[v] = 0; }
+
+      if( q_minqlevel != 1 )
+		{ return; }
+
+      for(unsigned int v = 1; v <= m_variables; ++v )
+		{
+
+		  if( q_level[v] > 1 )
+			{ continue; }
+
+		  unsigned int lit = v << 1;
+
+		  if( m_assignment[ lit^1 ] ) 
+			{ lit ^= 1; }
+
+		  for( unsigned int p = 0; p != q_replaces[v].size(); ++p )
+			{
+			  unsigned int pro = q_replaces[v][p];
+			  if( q_level[Lit(pro)>>1] > 1 )
+				{ continue; }
+			  m_model[pro>>1] = pro ^ (lit&1);
+#ifdef DEBUG
+			  std::cout << "replaced: set model of " << (pro>>1) << " to: " << getLit(m_model[pro>>1]) << std::endl;
+#endif			  
+			  assert( q_replaces[pro>>1].empty() );
+			}
+
+#ifdef DEBUG
+		  std::cout << "set model of " << v << " to: " << getLit(lit) << std::endl;
+#endif
+		  if( m_model[v] == 0 )
+			{ 
+			  if( !q_replaces[v].empty() && lit == 0 )
+				{ m_model[v] = v<<1; }
+			  else
+				{ m_model[v] = lit; }
+			}
+		}
+		  
+#ifdef DEBUG
+	  std::cout << "reset from solutioncube" << std::endl;
+#endif
+      //check the assignments of the last qube
+      for( unsigned int sq = 1; sq <= m_variables; ++sq )
+		{
+		  if( (q_solutioncube[sq] == 0) )
+			{ continue; }
+
+		  if( q_level[Lit(q_solutioncube[sq])>>1] > 1 )
+			{
+			  q_solutioncube[sq] = 0;
+			  continue; 
+			}
+		  
+		  // set the values of the outermost level to the value of the last cube.
+#ifdef DEBUG
+		  std::cout << "set model of " << getLit(q_solutioncube[sq]) << " to: " << getLit(q_solutioncube[sq]) << std::endl;
+#endif
+		  m_model[ Lit(q_solutioncube[sq])>>1 ] = q_solutioncube[sq];
+		  //clear solution cube for incremental run
+		  q_solutioncube[sq] = 0;
+		}
+
+#ifdef DEBUG
+	  for( unsigned int v = 1 ; v <= m_variables; ++v )
+		{
+		  if( m_model[v] != 0 )
+			{ std::cout << getLit(m_model[v]) << " "; }
+		}
+	  std::cout << std::endl;
+#endif
+      //extendModel();
+    }
+
+  // removes lit
+	void removeLit ( pointToClause* ptc, unsigned int lit, bool learned = false, bool cube = false )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+	std::cout << getLit(lit) << " (" << lit << ") from " << std::endl;
+	printClause(ptc);
+#endif
+
+	
+	unsigned int pos(0);
+	unsigned int qos(0);
+	unsigned int maxelevel(0);
+	while( ptc->clause()[pos] != 0 )
+	  {
+		if( ptc->clause()[ pos ] != lit )
+		  {
+			ptc->clause()[ qos ] = ptc->clause()[ pos ];
+		  
+			if( (isUniversal(ptc->clause()[qos]) == cube ) && q_level[Lit(ptc->clause()[qos])>>1] > maxelevel )
+			  { maxelevel = q_level[Lit(ptc->clause()[qos])>>1] ; }
+			++qos;
+		  }
+		++pos;
+	  }
+
+	ptc->clause()[qos] = 0;
+
+	pos = ptc->faq();
+	if( isUniversal(getUniFlag(lit)) == cube )
+	  { 
+		ptc->setFAQ(--pos); 
+	  }
+	qos = pos;
+	unsigned int clausesize = ptc->size()-1;
+
+	std::vector< unsigned int > updateoccur;
+	updateoccur.push_back(lit);
+	
+	while( ptc->clause()[pos] != 0 )
+	  {
+		if( q_level[ Lit(ptc->clause()[pos])>>1 ] < maxelevel )
+		  {
+			ptc->clause()[qos] = ptc->clause()[pos];
+			++qos;
+		  }
+		else
+		  { 
+			--clausesize; 
+			updateoccur.push_back(ptc->clause()[pos]);
+		  }
+		++pos;
+	  }
+
+	ptc->clause()[clausesize] = 0;
+	ptc->calcSign();
+	ptc->setSize(clausesize);
+
+	if( !learned )
+	  {
+		for( unsigned int i = 0; i != updateoccur.size(); ++i )
+		  {
+			unsigned int osize = q_occur[Lit(updateoccur[i])].size();
+			for( unsigned int f = 0; f != osize; ++f )
+			  {
+				if( ptc == q_occur[Lit(updateoccur[i])][f] )
+				  {
+					q_occur[Lit(updateoccur[i])][f] = q_occur[Lit(updateoccur[i])][--osize];
+					q_occur[Lit(updateoccur[i])].pop_back();
+					break;
+				  }
+			  }
+		  }
+	  }
+  }   
+
+	void sortsolve ( pointToClause* ptc )
+	{ 
+#ifdef PREDEBUG
+	  std::cout << __func__ << std::endl;
+	  printClause(ptc);
+	  std::cout << std::endl;
+#endif
+
+	  unsigned int pos(0);
+	  unsigned int maxeqlevel(0);
+	  while( pos < ptc->faq() )
+		{
+		  assert( !isUniversal(ptc->clause()[pos]) );
+
+#ifdef PREDEBUG
+		  std::cout << getLit(ptc->clause()[pos]) << " ";
+#endif
+		  if( q_level[Lit(ptc->clause()[pos])>>1] > maxeqlevel ) 
+			{
+			  maxeqlevel = q_level[Lit(ptc->clause()[pos])>>1]; 
+			}
+		  ++pos;
+		}
+#ifdef PREDEBUG
+	  std::cout << std::endl;
+#endif
+
+	  unsigned int size = ptc->size();
+	  unsigned int esize = sortClauseEU(ptc->clause(), size, maxeqlevel);
+
+#ifdef PREDEBUG
+	  printClause( ptc );
+#endif
+	  if( size != ptc->size() )
+		{ 
+		  std::cout << "size: " << size << " faq: " << esize << std::endl; 
+		  assert( size == ptc->size() );
+		}
+	  assert( esize == ptc->faq() );
+	}
+
+	void sortsolvecube ( pointToClause* ptc )
+	{ 
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+	  printClause(ptc);
+	  std::cout << std::endl;
+#endif
+
+	  unsigned int size = ptc->size();
+	  unsigned int* cube = ptc->clause();
+
+	  assert( cube[size] == 0 );
+	  assert( ptc->faq() <= size );
+
+	  unsigned int pos(1);
+	  unsigned int maxeqlevel(0);
+	  while( pos <= ptc->faq() )
+		{
+		  assert( isUniversal(cube[size-pos]) );  
+
+#ifdef PREDEBUG
+		  std::cout << getLit(ptc->clause()[size-pos]) << " ";
+#endif
+		  if( q_level[Lit(cube[size-pos])>>1] > maxeqlevel ) 
+			{
+			  maxeqlevel = q_level[Lit(cube[size-pos])>>1]; 
+			}
+		  ++pos;
+		}
+#ifdef PREDEBUG
+	  std::cout << std::endl;
+#endif
+
+#ifndef NDEBUG
+	  unsigned int esize = sortCubeUE(ptc->clause(), size, maxeqlevel);
+#else
+	  sortCubeUE(ptc->clause(), size, maxeqlevel);
+#endif
+
+#ifdef DEBUG
+	  printClause( ptc );
+#endif
+	  assert( size == ptc->size() );
+	  assert( esize == ptc->faq() );
+	}
+
+  // C Version of "sortClauseEU"
+  unsigned int sortClauseEU (unsigned int* myClause, unsigned int& clauselength, unsigned int maxeqlevel, bool removeuniv = true)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  assert( q_maxradix != 0 );
+
+	  if(clauselength == 0 ) { return 0; }
+
+	  int l = 0; 
+	  int h = (int)clauselength-1;
+	  unsigned int tLit = 0; 
+	  
+	  while( h>l )
+		{
+		  while ( !isUniversal(myClause[l]) && (h>l) )
+			{ l++; }
+		  while ( isUniversal(myClause[h]) && (h>l) )
+			{ h--; }
+		  
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+	  
+	  if ( (h>0) && isUniversal(myClause[h-1]) )
+		{ h--; }
+	  else if ( !isUniversal(myClause[h]) )
+		{ h++; }
+
+	  if( clauselength>1 && h < (int)clauselength ) 
+		{ sortClauseQLevel( myClause, h, clauselength-1, q_maxradix ); }
+
+	  if( removeuniv ) 
+		{
+		  for( unsigned int a = clauselength-1; a >= (unsigned int)h; --a )
+			{
+			  if( a < clauselength && q_level[Lit(myClause[a])>>1] > maxeqlevel ) 
+				{ 
+#ifdef EXDEBUG
+				  std::cout << "remove: " << getLit(myClause[a]) << std::endl;
+#endif
+				  --clauselength; 
+				}
+			  else { break; }
+			}
+		}
+
+	  return h;
+	}
+
+	unsigned int sortClauseEU (std::vector<unsigned int>& myClause, unsigned int& clauselength, unsigned int maxeqlevel, bool removeuniv = true)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  assert( q_maxradix != 0 );
+
+	  if(clauselength == 0 ) { return 0; }
+
+	  int l = 0; 
+	  int h = (int)clauselength-1;
+	  unsigned int tLit = 0; 
+	  
+	  while( h>l )
+		{
+		  while ( !isUniversal(myClause[l]) && (h>l) )
+			{ l++; }
+		  while ( isUniversal(myClause[h]) && (h>l) )
+			{ h--; }
+		  
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+	  
+	  if ( (h>0) && isUniversal(myClause[h-1]) )
+		{ h--; }
+	  else if ( !isUniversal(myClause[h]) )
+		{ h++; }
+
+	  if( clauselength>1 && h < (int)clauselength ) 
+		{ sortClauseQLevel( myClause, h, clauselength-1, q_maxradix ); }
+
+	  if( removeuniv ) 
+		{
+		  for( unsigned int a = clauselength-1; a >= (unsigned int)h; --a )
+			{
+			  if( a < clauselength && q_level[Lit(myClause[a])>>1] > maxeqlevel ) 
+				{ 
+#ifdef EXDEBUG
+				  std::cout << "remove: " << getLit(myClause[a]) << std::endl;
+#endif
+				  --clauselength; 
+				}
+			  else { break; }
+			}
+		}
+
+	  return h;
+	}
+
+	// Sort cubes in an universal and existential part, furthermore sort existential part wrt. quantification levels
+	// Return first position of an existential literal in clause (needed for solutionDatabase )
+	unsigned int sortCubeUE(std::vector<unsigned int>& myClause, unsigned int& clauselength, unsigned int maxuqlevel)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  assert( q_maxradix != 0 );
+
+	  if(clauselength == 0 ) { return 0; }
+
+	  int l = 0; 
+	  int h = (int)clauselength-1;
+	  unsigned int tLit = 0; 
+	  
+	  while( h>l )
+		{
+		  while ( isUniversal(myClause[l]) && (h>l) )
+			{ l++; }
+		  while ( !isUniversal(myClause[h]) && (h>l) )
+			{ h--; }
+		  
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+
+	  if ( (h>0) && !isUniversal(myClause[h-1]) )
+		{ h--; }
+	  else if ( isUniversal(myClause[h]) )
+		{ h++; }
+
+	  if( clauselength>1 )
+		{
+		  if( h < (int)clauselength ) 
+			{ sortClauseQLevel( myClause, h, clauselength-1, q_maxradix); }
+
+		  for( unsigned int a = clauselength-1; a >= (unsigned int)h; --a )
+			{
+			  if( a < clauselength && q_level[Lit(myClause[a])>>1] > maxuqlevel ) 
+				{
+#ifdef EXDEBUG
+				  std::cout << "remove: " << getLit(myClause[a]) << std::endl;
+#endif
+				  --clauselength; 
+				}
+			  else { break; }
+			}
+		}
+	  return h;
+	}
+
+  // C Version of "sortCubeUE"
+  unsigned int sortCubeUE (unsigned int* myClause, unsigned int& clauselength, unsigned int maxeqlevel, bool removeuniv = true)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  assert( q_maxradix != 0 );
+
+	  if(clauselength == 0 ) { return 0; }
+
+	  int l = 0; 
+	  int h = (int)clauselength-1;
+	  unsigned int tLit = 0; 
+	  
+	  while( h>l )
+		{
+		  while ( isUniversal(myClause[l]) && (h>l) )
+			{ l++; }
+		  while ( !isUniversal(myClause[h]) && (h>l) )
+			{ h--; }
+		  
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+	  
+	  if ( (h>0) && !isUniversal(myClause[h-1]) )
+		{ h--; }
+	  else if ( isUniversal(myClause[h]) )
+		{ h++; }
+
+	  if( clauselength>1 && h < (int)clauselength ) 
+		{ sortClauseQLevel( myClause, h, clauselength-1, q_maxradix ); }
+
+	  if( removeuniv ) 
+		{
+		  for( unsigned int a = clauselength-1; a >= (unsigned int)h; --a )
+			{
+			  if( a < clauselength && q_level[Lit(myClause[a])>>1] > maxeqlevel ) 
+				{ 
+#ifdef EXDEBUG
+				  std::cout << "remove: " << getLit(myClause[a]) << std::endl;
+#endif
+				  --clauselength; 
+				}
+			  else { break; }
+			}
+		}
+
+	  return h;
+	}
+
+	void getmaxradix( void )
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  unsigned int radix = 0;
+	  unsigned int maxqlevel = q_maxqlevel>>1;
+	  while( maxqlevel != 0 )
+		{ 
+		  ++radix; 
+		  maxqlevel >>= 1;
+		}
+
+	  q_maxradix = 1<<radix;
+	}
+
+	// Sort (part of a) clause by increasing quantification level
+	// range within "myClause" given by "low" and "high"
+	// "radix" has to initialized once with "getmaxradix"
+	void sortClauseQLevel(std::vector< unsigned int>& myClause, int low, int high, unsigned int radix)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  if ( radix<=1 || low>=high )
+		{ return; }
+
+	  int l = low; 
+	  int h = high; 
+	  unsigned int tLit = 0;
+
+#ifdef EXDEBUG
+	  std::cout << "l: " << l << " h: " << h << " radix: " << radix << std::endl;
+	  for(int i = 0; i <= h; ++i )
+		{
+		  std::cout << getLit(myClause[i]) << " (" << q_level[Lit(myClause[i])>>1] << ") ";
+		}
+	  std::cout << std::endl;
+#endif
+
+	  while( h>l )
+		{
+		  while ( ( ( q_level[Lit(myClause[l])>>1]&radix ) == 0 ) && (h>l) )
+			{ l++; }
+
+		  while ( ( ( q_level[Lit(myClause[h])>>1]&radix ) == radix ) && (h>l) )
+			{ h--; }
+
+#ifdef EXDEBUG
+		  std::cout << "swap " << l << ": " << getLit(myClause[l]) << " and " << h << ": " << getLit(myClause[h]) << std::endl;
+#endif
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+
+	  if ( (h>low)&&( ( q_level[Lit(myClause[h-1])>>1]&radix ) == radix ) )
+		{ h--; }
+	  else if ( ( q_level[Lit(myClause[h])>>1]&radix ) == 0 )
+		{ h++; }
+
+	  sortClauseQLevel(myClause, h, high, radix>>1);
+	  sortClauseQLevel(myClause, low, h-1, radix>>1);
+	}
+
+	/*C-Version*/
+	void sortClauseQLevel(unsigned int* myClause, int low, int high, unsigned int radix)
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  if ( radix<=1 || low>=high )
+		{ return; }
+
+	  int l = low; 
+	  int h = high; 
+	  unsigned int tLit = 0;
+
+#ifdef EXDEBUG
+	  std::cout << "l: " << l << " h: " << h << " radix: " << radix << std::endl;
+
+	  unsigned int i(0);
+	  while( myClause[i] != 0 )
+		{
+		  std::cout << getLit(myClause[i]) << " (" << q_level[Lit(myClause[i])>>1] << ") ";
+		  ++i;
+		}
+	  std::cout << std::endl;
+#endif
+
+	  while( h>l )
+		{
+		  while ( ( ( q_level[Lit(myClause[l])>>1]&radix ) == 0 ) && (h>l) )
+			{ l++; }
+
+		  while ( ( ( q_level[Lit(myClause[h])>>1]&radix ) == radix ) && (h>l) )
+			{ h--; }
+
+#ifdef EXDEBUG
+		  std::cout << "swap " << l << ": " << getLit(myClause[l]) << " and " << h << ": " << getLit(myClause[h]) << std::endl;
+#endif
+		  tLit = myClause[h]; 
+		  myClause[h] = myClause[l];
+		  myClause[l] = tLit;
+		}
+
+	  if ( (h>low)&&( ( q_level[Lit(myClause[h-1])>>1]&radix ) == radix ) )
+		{ h--; }
+	  else if ( ( q_level[Lit(myClause[h])>>1]&radix ) == 0 )
+		{ h++; }
+
+	  sortClauseQLevel(myClause, h, high, radix>>1);
+	  sortClauseQLevel(myClause, low, h-1, radix>>1);
+	}
+
+	// Determine the position of the uip in conflict clause (assumes that "myClause" is already sorted wrt. sortClauseEU() )
+	unsigned int uipPos(std::vector< unsigned int>& myClause, unsigned int uip, unsigned int faq, unsigned int size, bool cube) const
+	{
+#ifdef EXDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  if( cube == isUniversal(uip) )
+		{ return 0; }
+	  else if ( faq == size )
+		{ return size; }
+	  else
+		{
+		  while( faq < size && q_level[Lit(myClause[faq])>>1] < q_level[Lit(uip)>>1])
+			{ ++faq; }
+		  return faq;
+		}
+	}
+
+	// This method assumes that the clause is already sorted wrt. sortClauseEU(), but some literal(s) were removed
+	void recalcFaq(pointToClause* clause, bool cube = false)
+	{
+	  unsigned int pos(0);
+	  do {
+		if( isUniversal( clause->clause()[pos] ) != cube ) break;
+		++pos;
+	  } while( clause->clause()[pos] != 0 );
+	  clause->setFAQ(pos);
+	  return;
+	}
+
+#ifdef STATS
+
+	// print a measurement for solving process to std::out
+	// the higher the value the more variables are assigned on low decision level
+
+	double getFds( void )
+	{
+	  unsigned int tmpi(0);
+	  double sum(0);
+	  unsigned int curmlevel(0);
+	  for(unsigned int i = 0 ; i < m_dsEndIndex; ++i )
+		{
+		  if( curmlevel < m_level[Lit(m_decisionStack[i])>>1] )
+			{
+			  sum += (double)tmpi/pow(m_decisionLevel+1,curmlevel);
+			  ++curmlevel;
+			  tmpi = 0;
+			}
+		  ++tmpi;
+		}
+	  std::cout << "F: " << m_decisions << " " << sum;
+
+	  // additional stats: print average lbd value of learned stuff (needed for "simplify()")
+
+	  std::cout << " ; " << m_conflicts << "," << m_clausesDynamic << "," <<  q_solutions << "," << m_cubes << ",";
+	  if( m_clausesDynamic != 0 )
+		{
+		  std::cout << m_tlbd/m_clausesDynamic << ",";
+		}
+	  else
+		{
+		  std::cout << "0,";
+		}
+	  if( m_cubes != 0 ) 
+		{
+		  std::cout << m_ttlbd/m_cubes;
+		}
+	  else 
+		{
+		  std::cout << "0";
+		}
+	  std::cout << std::endl;
+	  return sum;
+	}
+#endif
+	
+	// Return true iff "lit" is universally quantified
+	// The first bit indicates iff the literal is universal
+	inline bool isUniversal (unsigned int lit) const { return ( (lit & UNIFLAG) > 0); }
+
+  public:
+
+	// load "qlevel" for "lit"
+	// return "false" if something went wrong
+	bool setQVarLevel(unsigned int var, unsigned int qlevel)
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  assert( (var<<1) < UNIFLAG );
+	  assert( qlevel > 0 );
+
+	  if(q_level.size() <= var )
+		{ q_level.resize(var+1, 0); }
+
+	  // "var" already defined? 
+	  if (q_level[var] != 0)
+		{ 
+
+		  // Did we have defined "var" on a different qlevel? -> something went wrong
+		  // Otherwise: nothing to do here
+		  if( q_level[var] != qlevel )
+			{ return false; }
+
+		  return true; 
+		}
+
+	  q_level[var] = qlevel;
+	
+	  // Update maximum qlevel
+	  if( qlevel > q_maxqlevel ) 
+		{
+		  q_litbylevel.resize(qlevel);
+		  //q_solorder.resize(qlevel);
+		  q_varOrder.resize(qlevel,NULL); 
+		  q_varOrder2.resize(qlevel,NULL);
+		  q_maxqlevel = qlevel;
+		}
+
+	  q_litbylevel[qlevel-1].push_back(var<<1);
+	  unsigned int variables = m_variables;
+
+	  // Do we have to update all data structures depending on the number of variables?
+	  if ( var > m_variables)
+		{ updateDataStructures( var ); }
+
+	 
+	  if( q_varOrder[qlevel-1] == NULL )
+		{
+		  if( (qlevel>>1) >= q_maxradix )
+			{ getmaxradix(); }
+
+		  if( qlevel == 1 )
+			{ q_minqlevel = 1; }
+		  
+		  VarHeap<double>* levelheap = new VarHeap<double>(m_activity, m_variables);
+		  q_varOrder[qlevel-1] = levelheap;
+		  
+		  VarHeap<unsigned int>* levelheap2 = new VarHeap<unsigned int>(m_activity2, m_variables);
+		  q_varOrder2[qlevel-1] = levelheap2;		  
+		}
+	  else if( var > variables )
+		{
+		  q_varOrder[qlevel-1]->resize(var);
+		  q_varOrder2[qlevel-1]->resize(var);
+		}
+	  
+	  // Everything went fine.
+	  return true;
+	}
+
+	// if level is complete, setup levelheap and activities
+	void setupLevelActivities(unsigned int qlevel)
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  if( (q_maxqlevel>>1) >= q_maxradix )
+		{ getmaxradix(); }
+
+	  if( qlevel == 1 )
+		{ q_minqlevel = 1; }
+
+	  VarHeap<double>* levelheap = new VarHeap<double>(m_activity, m_variables);
+	  q_varOrder[qlevel-1] = levelheap;
+	  
+	  VarHeap<unsigned int>* levelheap2 = new VarHeap<unsigned int>(m_activity2, m_variables);
+	  q_varOrder2[qlevel-1] = levelheap2;		  
+
+	  return;
+	}
+
+	// return all learned clauses
+	// all units will be returned
+	// all learned binary clauses will be returned 
+	// all leanred n-nary clauses with at least "ressteps" resolution steps will be return
+	// if "ressteps" is set to "0" all learned clauses will be returned
+	// all clauses has a final "0". All n-nary clauses ends withs number of resultion steps
+	// only allowed to call on rootlevel
+	void getLearnedClauses( std::vector< std::vector< unsigned int > >& learnedclauses )
+	{
+	  assert( m_decisionLevel == 0 );
+
+	  for( unsigned int d = 1; d < m_dsEndIndex; ++d)
+		{
+#ifdef EXDEBUG
+		  std::cout << "dstack[" << d << "]= " << getLit(m_decisionStack[d]) << " [" << assignedTo(m_decisionStack[d]) << "]" << std::endl;
+#endif
+		  if( isDC(m_decisionStack[d]) )
+			{ continue; }
+		  std::vector< unsigned int > unit;
+		  unit.push_back(Lit(m_decisionStack[d]));
+		  unit.push_back(0);
+		  learnedclauses.push_back(unit);
+		}
+	  
+	  std::vector<std::set<int> > used( (m_variables << 1)+2 );
+#ifdef EXDEBUG
+	  std::cout << "bins: " << std::endl;
+#endif
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  std::set<int>& usedneglit = used[(v<<1)];
+		  
+		  if( !m_assignment[v<<1] )
+			{         
+			  for( unsigned int i = m_binWatchesLearnedIndex[v<<1]; i < m_binWatches[v<<1].size(); ++i )
+				{
+#ifdef EXDEBUG
+				  std::cout << v << " [" << assignedTo(v<<1) << "] " << getLit(m_binWatches[v<<1][i]) << " [" << assignedTo(m_binWatches[v<<1][i]) << std::endl;
+#endif
+				  if( m_assignment[Lit(m_binWatches[v<<1][i])] )
+					{ continue; }
+
+				  if( usedneglit.find( m_binWatches[v<<1][i] ) == usedneglit.end() )
+					{
+					  usedneglit.insert( m_binWatches[v<<1][i] );
+					  used[ Lit(m_binWatches[v<<1][i]) ].insert( (v<<1) );
+                
+					  std::vector< unsigned int > bin;
+				  
+					  if( !m_assignment[ (v<<1)^1 ] )
+						{ bin.push_back(v<<1); }
+				  
+					  if( !m_assignment[ Lit(m_binWatches[v<<1][i]^1) ] )
+						{ bin.push_back(Lit(m_binWatches[v<<1][i])); }
+
+					  assert( bin.size() > 0 );
+
+					  bin.push_back(0);
+
+#ifdef EXDEBUG
+					  std::cout << "add: ";
+					  unsigned int pos(0);
+					  while( bin[pos] != 0 )
+						{ std::cout << getLit(bin[pos]) << " "; ++pos; }
+					  std::cout << std::endl;
+#endif
+					  
+					  learnedclauses.push_back(bin);
+					}
+				}
+			}
+
+		  std::set<int>& usedposlit = used[(v<<1)^1];
+
+		  if( !m_assignment[(v<<1)^1] )
+			{
+        
+			  for( unsigned int i = m_binWatchesLearnedIndex[(v<<1)^1]; i < m_binWatches[(v<<1)^1].size(); ++i )
+				{
+#ifdef EXDEBUG
+				  std::cout << "-" << v << " [" << assignedTo((v<<1)^1) << "] " << getLit(m_binWatches[(v<<1)^1][i]) << " [" << assignedTo(m_binWatches[v<<1][i]) << std::endl;
+#endif
+				  if( m_assignment[Lit(m_binWatches[(v<<1)^1][i])] )
+					{ continue; }
+
+				  if( usedposlit.find( m_binWatches[(v<<1)^1][i] ) == usedposlit.end() )
+					{
+					  usedposlit.insert( m_binWatches[(v<<1)^1][i] );
+					  used[ Lit(m_binWatches[(v<<1)^1][i]) ].insert( (v<<1)^1 );
+
+
+					  std::vector< unsigned int > bin;
+					  if( !m_assignment[ v<<1 ] )
+						{ bin.push_back((v<<1)^1); }
+				  
+					  if( !m_assignment[ Lit(m_binWatches[(v<<1)^1][i]^1) ] )
+						{ bin.push_back(Lit(m_binWatches[(v<<1)^1][i])); }
+
+					  assert( bin.size() > 0 );
+					  bin.push_back(0);
+
+#ifdef EXDEBUG
+					  std::cout << "add: ";
+					  unsigned int pos(0);
+					  while( bin[pos] != 0 )
+						{ std::cout << getLit(bin[pos]) << " "; ++pos; }
+					  std::cout << std::endl;
+#endif
+
+					  learnedclauses.push_back(bin);
+					}
+				}
+			}
+		}
+#ifdef EXDEBUG
+	  std::cout << "n-naries: " << std::endl;
+#endif
+
+	  for( unsigned int cl = 0; cl != m_clauseDatabase.size(); ++cl )
+		{
+		  pointToClause* ptc = m_clauseDatabase[cl];
+		  if( ptc->lbd() <= 1 )
+			{ continue; }
+
+		  // skip clauses which are already satisfied on dL "0"
+		  if( m_assignment[ptc->wl0] || m_assignment[Lit(ptc->wl1)] )
+			{ continue; }
+
+#ifdef EXDEBUG
+		  printClause(ptc);
+#endif
+	  
+		  std::vector< unsigned int > nclause;
+		  unsigned int pos(0);
+		  while( ptc->clause()[pos] != 0 )
+			{
+			  if( m_assignment[Lit(ptc->clause()[pos])] )
+				{ break; }
+			  if( !m_assignment[Lit(ptc->clause()[pos])^1] )
+				{ nclause.push_back( Lit(ptc->clause()[pos]) ); }
+			  ++pos;
+			}
+
+		  if( ptc->clause()[pos] == 0 )
+			{
+			  nclause.push_back(0);
+
+#ifdef EXDEBUG
+			  std::cout << "add: ";
+			  unsigned int pos(0);
+			  while( nclause[pos] != 0 )
+				{ std::cout << getLit(nclause[pos]) << " "; ++pos; }
+			  std::cout << std::endl;
+#endif
+
+			  nclause.push_back(ptc->steps());
+			  learnedclauses.push_back(nclause);
+			}
+		}
+
+#ifdef DEBUG
+	  for( unsigned int i = 0; i != learnedclauses.size(); ++i )
+		{
+		  unsigned int pos(0);
+		  while( learnedclauses[i][pos] != 0 )
+			{
+			  std::cout << getLit(learnedclauses[i][pos]) << " ";
+			  ++pos;
+			}
+		  std::cout << "0 ";
+		  if( (pos+1) < learnedclauses[i].size() )
+			{ std::cout << learnedclauses[i][pos+1]; }
+		  std::cout << std::endl;
+		}
+#endif
+	}
+
+
+	void updateLitLists( std::vector<unsigned int>& watchcandidate )
+	{
+	  while( !watchcandidate.empty() )
+		{
+		  unsigned int wlit(watchcandidate.back());
+		  watchcandidate.pop_back();
+
+#ifdef DEBUG
+		  std::cout << "find new watchclause for " << getLit(wlit) << std::endl;
+#endif
+		
+		  unsigned int size = (unsigned int)q_occur[Lit(wlit)].size();
+		
+		  if( size == 0 )
+			{ continue; }
+		  else if( isPureOrDC(wlit) || m_assignment[Lit(wlit)])
+			{ 
+#ifdef DEBUG
+			  std::cout << getLit(wlit) << " isPureOrDC or assigned" << std::endl;
+#endif
+			  q_occur[Lit(wlit)][0]->litlist.push_back(wlit);
+			  continue;
+			}
+		
+		  unsigned int j = 0;
+		  for( ; j < size; ++j )
+			{
+			  pointToClause* ptc = q_occur[Lit(wlit)][j];
+#ifdef DEBUG
+			  printClause(ptc);
+#endif
+			  /* is clause satisfied? Then try next clause 
+				 otherwise, this clause is new watchclause */
+			  if( m_assignment[ ptc->wl0 ] || m_assignment[ ptc->wl1 ] || m_assignment[ Lit(ptc->wla) ] )
+				{ continue; }
+
+#ifdef DEBUG
+			  std::cout << "new watchclause found" << std::endl;
+#endif
+
+			  ptc->litlist.push_back(wlit);
+
+			  q_occur[Lit( wlit ) ][j] = q_occur[Lit( wlit ) ][0];
+			  q_occur[Lit( wlit ) ][0] = ptc;
+			  break;
+			}
+
+		  if( j == size )
+			{
+#ifdef DEBUG
+			  std::cout << "no watchclause found, put in first clause" << std::endl;
+#endif
+			  q_occur[Lit(wlit)][0]->litlist.push_back(wlit);
+			}
+		}
+	}
+
+	// eliminate "m_clauseDatabase[db]->clause()[pos]" from "m_clauseDatabase[db]"
+	// return false if QBF is unsatisfied 
+	bool strengthenClauseOld( unsigned int pos, unsigned int db, unsigned int& dbsize, std::vector<unsigned int>& watchcandidate, bool& clausedeleted )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  unsigned int lit = m_clauseDatabase[db]->clause()[pos];
+	  unsigned int qos = pos+1;
+
+#ifdef DEBUG
+	  std::cout << "delete: " << getLit(lit) << " from: " << std::endl;
+	  printClause(m_clauseDatabase[db]);
+#endif
+	
+	  // recalc universal literal pointer!
+	  unsigned int faq = m_clauseDatabase[db]->faq()-1;	
+	  m_clauseDatabase[db]->setFAQ(faq);
+
+	  // Remove clause[pos], shift all other literals to the left
+	  while( m_clauseDatabase[db]->clause()[pos] != 0 )
+		{ m_clauseDatabase[db]->clause()[pos++] = m_clauseDatabase[db]->clause()[qos]; ++qos;}
+
+	  assert( pos > 2 );
+
+	  // Clean occurence- and watchlists wrt. "lit"
+	  // Just needed for original clause set -- no occurence lists for learned clauses
+	  if( m_clauseDatabase[db]->lbd() == 1 )
+		{
+#ifdef DEBUG
+		  std::cout << "occur list of " << getLit(lit) << std::endl;
+		  printOccur( lit );
+#endif
+		  std::vector< pointToClause* >& occur(q_occur[lit]);
+		
+		  unsigned int osize = (unsigned int)occur.size();
+		  for( unsigned int i = 0; i < osize; ++i)
+			{
+			  if( m_clauseDatabase[db] == occur[i] )
+				{
+#ifdef DEBUG
+				  std::cout << "remove clause from occurlist" << std::endl;
+#endif
+				  occur[i] = occur[--osize];
+				  occur.pop_back();
+				  break;
+				}
+			}
+#ifdef DEBUG
+		  std::cout << "occur list after delete: " << std::endl;
+		  printOccur( lit );
+#endif
+		  if( std::find(m_clauseDatabase[db]->litlist.begin(), m_clauseDatabase[db]->litlist.end(), lit ) != m_clauseDatabase[db]->litlist.end() )
+			{
+			  if( ( !m_assignment[Lit(lit)] && !m_assignment[Lit(lit)^1] ) || m_level[Lit(lit)>>1] != 0 )
+				{ watchcandidate.push_back(lit); }
+			}
+		}
+
+
+	  // binary clause?
+	  if( pos == 3 )
+		{
+		  unsigned int i1 = m_clauseDatabase[db]->clause()[0];
+		  unsigned int i2 = m_clauseDatabase[db]->clause()[1];
+
+#ifdef DEBUG
+		  std::cout << "new binary clause: " << getLit(i1) << " " << getLit(i2)<< std::endl;
+#endif
+
+		  bool isLearned( m_clauseDatabase[db]->lbd() > 1 );
+		  addBinary( i1, i2, isLearned );
+
+#ifdef DEBUG
+		  std::cout << "binclause: " << getLit(m_clauseDatabase[db]->clause()[0]) << " [" << assignedTo(m_clauseDatabase[db]->clause()[0]) << "] " << getLit(m_clauseDatabase[db]->clause()[1]) << " [" << assignedTo(m_clauseDatabase[db]->clause()[1]) << "]" << std::endl;
+#endif
+
+		  // now delete clause from nary database
+		  deleteClause(db, dbsize, watchcandidate, true);
+		  clausedeleted = true;
+		}
+	  else
+		{
+		  // update watches
+		  unsigned int wl0 = m_clauseDatabase[db]->wl0;
+		  unsigned int wl1 = m_clauseDatabase[db]->wl1;
+
+		  m_clauseDatabase[db]->setSize( m_clauseDatabase[db]->size()-1 );
+
+		  // deleted lit was watched literal?
+		  if( lit == wl0 || lit == wl1 )
+			{
+#ifdef DEBUG
+			  std::cout << "update watchlist " << std::endl;
+#endif
+			  if( wl1 == 0 )
+				{
+#ifdef DEBUG
+				  std::cout << "deleted last ex lit -> problem unsat" << std::endl;
+#endif
+				  assert( wl0 == lit );
+				  // we have deleted the last existential lit -> problem unsat
+				  return false;
+				}
+			  else 
+				{	
+#ifdef DEBUG
+				  std::cout << "search for new watchlit" << std::endl;
+#endif
+				  // search for next unwatched lit
+				  // this assumes that there is no unsigned lit in clause
+
+				  unsigned int pos(0);
+				  while( m_clauseDatabase[db]->clause()[pos] == wl0 || m_clauseDatabase[db]->clause()[pos] == wl1 )
+					{ ++pos; }
+
+#ifdef DEBUG
+				  std::cout << "new watchlit: " << getLit(m_clauseDatabase[db]->clause()[pos]) << std::endl;
+#endif
+				  assert( pos < faq );
+				  assert( !m_assignment[m_clauseDatabase[db]->clause()[pos]] && !m_assignment[m_clauseDatabase[db]->clause()[pos]] );
+			
+				  if( wl0 == lit )
+					{ m_clauseDatabase[db]->wl0 = m_clauseDatabase[db]->clause()[pos]; }
+				  else
+					{ m_clauseDatabase[db]->wl1 = m_clauseDatabase[db]->clause()[pos]; }
+
+#ifdef DEBUG
+				  std::cout << "new watches setted: " << std::endl;
+				  printClause(m_clauseDatabase[db]);
+#endif
+	
+				  // remove clause from watchlist of "lit"
+				  if( m_clauseDatabase[db]->lbd() == 1 )
+					{
+					  unsigned int wsize((unsigned int)m_watches[lit].size());
+				
+					  for( unsigned int w = 0; w != wsize; ++w )
+						{
+						  if( m_watches[lit][w] == m_clauseDatabase[db] )
+							{
+#ifdef DEBUG
+							  std::cout << getLit(lit) << " from watchlist removed" << std::endl;
+#endif
+							  m_watches[lit][w] = m_watches[lit][--wsize];
+							  m_watches[lit].pop_back();
+							  break;
+							}
+						}
+					}
+				  else
+					{
+					  // learned clause...
+					  unsigned int wsize((unsigned int)m_learnedWatches[lit].size());
+				
+					  for( unsigned int w = 0; w != wsize; ++w )
+						{
+						  if( m_learnedWatches[lit][w] == m_clauseDatabase[db] )
+							{
+#ifdef DEBUG
+							  std::cout << getLit(lit) << " from learned watchlist removed" << std::endl;
+#endif
+							  m_learnedWatches[lit][w] = m_learnedWatches[lit][--wsize];
+							  m_learnedWatches[lit].pop_back();
+							  break;
+							}
+						}
+					}
+				}
+			}
+		}
+	  return true;
+	}
+
+	void deleteClause( unsigned int& db, unsigned int& dbsize, std::vector<unsigned int>& watchcandidate, bool deletewatches = false )
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  assert( db < dbsize );
+	  /* update occurens list*/
+	  unsigned int pos(0);
+	  pointToClause* ptc = m_clauseDatabase[db];
+	  unsigned int clit(ptc->clause()[pos]);
+
+	  while( clit != 0 )
+		{
+		  unsigned int i(0);
+		  unsigned int osize((unsigned int)q_occur[Lit(clit)].size());
+		  for( ; i != osize; ++i )
+			{
+			  if( ptc == q_occur[Lit(clit)][i] )
+				{
+				  q_occur[Lit(clit)][i] = q_occur[Lit(clit)][--osize];
+				  q_occur[Lit(clit)].pop_back();
+				  --i;
+				  break;
+				}
+			}
+		
+		  clit = ptc->clause()[++pos];
+		}
+
+	  //clear watchlists
+	  if( deletewatches )
+		{
+		  unsigned int wl0 = ptc->wl0;
+		  unsigned int wl1 = ptc->wl1;
+		  unsigned int wla = Lit(ptc->wla);
+
+		  if( ptc->lbd() > 1 )
+			{
+			  unsigned int wsize = (unsigned int)m_learnedWatches[wl0].size();
+			  unsigned int w = 0;
+			  for(; w < wsize; ++w)
+				{
+				  if( m_learnedWatches[wl0][w] == ptc )
+					{
+#ifdef DEBUG
+					  std::cout << "delete watch " << getLit(wl0) << std::endl;
+#endif
+					  m_learnedWatches[wl0][w] = m_learnedWatches[wl0][--wsize];
+					  m_learnedWatches[wl0].pop_back();
+					  break;
+					}
+				}
+			
+			  if( wl1 != 0 )
+				{
+				  wsize = (unsigned int)m_learnedWatches[wl1].size();
+
+				  for(w=0; w < wsize; ++w)
+					{
+					  if( m_learnedWatches[wl1][w] == ptc )
+						{
+#ifdef DEBUG
+						  std::cout << "delete watch " << getLit(wl1) << std::endl;
+#endif
+						  m_learnedWatches[wl1][w] = m_learnedWatches[wl1][--wsize];
+						  m_learnedWatches[wl1].pop_back();
+						  break;
+						}
+					}
+				}
+				
+			  if( wla != 0 )
+				{
+				  wsize = (unsigned int)m_learnedWatches[wla].size();
+
+				  for(w = 0; w < wsize; ++w)
+					{
+					  if( m_learnedWatches[wla][w] == ptc )
+						{
+#ifdef DEBUG
+						  std::cout << "delete watch " << getLit(wla) << std::endl;
+#endif
+						  m_learnedWatches[wla][w] = m_learnedWatches[wla][--wsize];
+						  m_learnedWatches[wla].pop_back();
+						  break;
+						}
+					}
+				}
+			}
+		  else
+			{
+			  unsigned int wsize = (unsigned int)m_watches[wl0].size();
+			  unsigned int w = 0;
+			  for(; w < wsize; ++w)
+				{
+				  if( m_watches[wl0][w] == ptc )
+					{
+#ifdef DEBUG
+					  std::cout << "delete watch " << getLit(wl0) << std::endl;
+#endif
+					  m_watches[wl0][w] = m_watches[wl0][--wsize];
+					  m_watches[wl0].pop_back();
+					  break;
+					}
+				}
+			
+			  if( wl1 != 0 )
+				{
+				  wsize = (unsigned int)m_watches[wl1].size();
+
+				  for(w = 0 ; w < wsize; ++w)
+					{
+					  if( m_watches[wl1][w] == ptc )
+						{
+#ifdef DEBUG
+						  std::cout << "delete watch " << getLit(wl1) << std::endl;
+#endif
+						  m_watches[wl1][w] = m_watches[wl1][--wsize];
+						  m_watches[wl1].pop_back();
+						  break;
+						}
+					}
+				}
+			
+			  if( wla != 0 )
+				{
+				  wsize = (unsigned int)m_watches[wla].size();
+				
+				  for(w = 0; w < wsize; ++w)
+					{
+					  if( m_watches[wla][w] == ptc )
+						{
+#ifdef DEBUG
+						  std::cout << "delete watch " << getLit(wla) << std::endl;
+#endif
+						  m_watches[wla][w] = m_watches[wla][--wsize];
+						  m_watches[wla].pop_back();
+						  break;
+						}
+					}
+				}
+			}
+		}
+	
+	  /* update litlists */
+	  for( unsigned int lw = 0; lw != ptc->litlist.size(); ++lw )
+		{
+		  unsigned int llit = ptc->litlist[lw];
+		  if( ( !m_assignment[Lit(llit)] && !m_assignment[Lit(llit)^1] ) || m_level[Lit(llit)>>1] != 0 )
+			{
+#ifdef DEBUG
+			  std::cout << "find new watchlit for: " << getLit(llit) << std::endl;
+#endif
+			  watchcandidate.push_back(llit);
+			}
+		}
+
+	  // Delete!
+	  m_openIDs.push_back(ptc->id());
+	  delete ptc;
+	  m_clauseDatabase[db--] = m_clauseDatabase[--dbsize];
+	  m_clauseDatabase.pop_back();
+	  return;
+	}
+
+
+	/*Debugging stuff*/
+	void printdatabase ( bool watches = false ) const;
+	void exportDatabase( std::ostream& os = std::cout ) const;
+
+	int getLit (unsigned int var) const;
+	int assignedTo ( unsigned int lit ) const;
+	
+	/* Some Testing, if our learned clause contains at least one
+	   unassigned literal and no positively assigned literals.
+	   Assumes that we are already on the correct backtracklevel */
+	bool checkLearnedCLause( pointToClause* ptc, unsigned int forcelit ) const;
+
+	/* check if clause is correctly sorted */
+	bool checkSorting( pointToClause* ptc ) const;
+
+	// Checks whether we produce a clause, that we already have in our Clausedatabase
+	bool checkingDuplicates( const std::vector<unsigned int>& clause, unsigned int uip = 0 ) const;
+
+	// Check clauses against crappy data
+	bool checkAllClauses( void ) const;
+	bool checkClause( pointToClause* ptc ) const;
+
+	void printClause ( const pointToClause* clause ) const;
+	void printClause ( const unsigned int* clause, bool checkconflict = false ) const;
+	void printClause ( const std::vector< unsigned int >& clause ) const;
+	void printBinaries ( unsigned int lit ) const;
+	void printOccur ( unsigned int lit ) const;
+	void printOccurlist ( void ) const;
+
+	void printWatches ( unsigned int lit ) const;
+	void printWatchLists ( void ) const;
+	void dumpCNF ( std::ostream& os = std::cout ) const;
+#ifdef COMBSOLVER
+	void dumpCNFComb ( std::ostream& os ) const;
+#endif
+
+  private:
+
+	/*some functions for setting flag bits*/
+
+	inline void setUniFlag ( unsigned int& lit ) const 
+	{
+	  assert( (Lit(lit)>>1) < q_level.size() );
+
+	  if( (q_level[Lit(lit)>>1] & 1 ) == 0 )
+		{ lit |= UNIFLAG; }
+	}
+	
+	inline unsigned int getUniFlag ( unsigned int lit ) const 
+	{
+	  assert( (Lit(lit)>>1) < q_level.size() );
+
+	  if( (q_level[Lit(lit)>>1] & 1 ) == 0 )
+		{ lit |= UNIFLAG; }
+	  return lit;
+	}
+
+	inline bool isDecision( unsigned int lit ) const
+	{ return ( (q_reason[Lit(lit)>>1] & 7) == 0 ); }
+
+	inline bool isUnit ( unsigned int lit ) const
+	{ return ( ( q_reason[Lit(lit)>>1] & 1 ) != 0 ); }
+
+	/* is the literal an unit forced by an original clause? */
+	inline bool isOrgUnit( unsigned int lit ) const 
+	{ return ( ( q_reason[Lit(lit)>>1] ^ 1 ) == 0 ); }
+
+	inline bool isPure ( unsigned int lit ) const
+	{ return ( ( q_reason[Lit(lit)>>1] & 2 ) != 0 ); }
+
+	bool isEPure ( unsigned int lit ) const
+	{ 
+	  if( !isUniversal(lit) )
+		{ return isPure(lit); }
+	  else
+		{ return false; }
+	}
+
+	bool isUPure ( unsigned int lit ) const
+	{
+	  if( isUniversal(lit) )
+		{ return isPure(lit); }
+	  else
+		{ return false; }
+	}
+
+	inline bool isDC ( unsigned int lit ) const
+	{ return ( ( q_reason[Lit(lit)>>1] & 4 ) != 0 ); }
+
+	bool isEDC ( unsigned int lit ) const
+	{
+	  if( !isUniversal(lit) )
+		{ return isDC(lit); }
+	  else
+		{ return false; }
+	}
+	 
+	bool isUDC ( unsigned int lit ) const
+	{ 
+	  if( isUniversal(lit) )
+		{ return isDC(lit); }
+	  else
+		{ return false; }
+	}
+
+
+	inline bool isPureOrDC( unsigned int lit ) const
+    { return ( ( q_reason[Lit(lit)>>1] & 6 ) != 0 ); }
+
+	bool isEPureOrDC( unsigned int lit ) const
+	{ return isEPure(lit); }
+
+	bool isUPureOrDC( unsigned int lit ) const
+	{ return isUPure(lit); }
+
+	inline void setUnit ( unsigned int lit )
+	{ 
+	  assert( q_reason[Lit(lit)>>1] == 0 );
+	  q_reason[Lit(lit)>>1] = 1; 
+#ifdef EXDEBUG
+	  std::cout << "setunit: " << getLit(lit) << " = " << q_reason[Lit(lit)>>1] << std::endl;
+#endif
+	}
+
+	inline void setLearnedUnit( unsigned int lit )
+	{
+	  assert( q_reason[Lit(lit)>>1] == 0 ); 
+	  q_reason[Lit(lit)>>1] = 9;
+	}
+
+	inline void setPure ( unsigned int lit )
+	{ 
+	  q_reason[Lit(lit)>>1] = 2; 
+#ifdef EXDEBUG
+	  std::cout << "setpure: " << getLit(lit) << " = " << q_reason[Lit(lit)>>1] << std::endl;
+#endif
+	}
+
+	inline void setDC ( unsigned int lit )
+	{ 
+	  q_reason[Lit(lit)>>1] |= 4; 
+#ifdef EXDEBUG
+	  std::cout << "setdc: " << getLit(lit) << " = " << q_reason[Lit(lit)>>1] << std::endl;
+#endif
+	}
+	
+	inline void resetDC ( unsigned int lit )
+	{
+	  q_reason[Lit(lit)>>1] &= 3;
+#ifdef EXDEBUG
+	  std::cout << "resetdc: " << getLit(lit) << " = " << q_reason[Lit(lit)>>1] << std::endl;
+#endif
+	}
+
+	inline void unsetReason ( unsigned lit )
+	{ q_reason[Lit(lit)>>1] = 0; }
+
+
+	// preprocessor functions
+	bool fastPreprocess( bool& didsomething );
+	bool variableElimination ( unsigned int& didsomething );
+	bool cubeResolution ( std::vector< std::vector< pointToClause* > >& cubeoccur );
+	bool detectMonotone ( bool& didsomething );
+    bool findBinaryConsAndEquiv ( bool& didsimething );
+	bool subsumptionCheck ( unsigned int& didsomething /*, bool full = true*/ );
+	bool upla ( unsigned int& didsomething );
+    bool propagateUnits ( bool delall = false );
+	bool mergeQuantLevel ( unsigned int& didsomething );
+
+	bool forallReduction ( bool& didsomething );
+	bool forallReduction ( pointToClause* ptc, unsigned int maxelevel, bool& isremoved );
+	bool existReduction ( pointToClause* ptc, unsigned int maxulevel );
+
+	// Helper functions for preprocessing
+	void preparePreprocessing ( void );
+	void prepareInprocessing ( void );
+	unsigned int postProcess ( bool& didsomething, bool inprocess );
+    void deleteVariableFromDB ( unsigned int var );
+    void updateWatches ( void );
+	void updateVarorder ( void );
+    bool replaceVariable ( unsigned int toReplace, unsigned int replace);
+	bool strengthenClause ( pointToClause* clause, unsigned int literal, bool keepoccurence );
+	bool strengthenCube ( pointToClause* cube, unsigned int literal );
+	void extendModel ( void );
+	void clearAllOccurences ( pointToClause* clause );
+	void clearAllOccurences ( pointToClause* clause, std::vector< std::vector< pointToClause* > >& occurlist );
+	void removeFromOccurenceList ( unsigned int lit, pointToClause* clause );
+	void removeFromOccurenceList ( unsigned int lit, pointToClause* clause, std::vector< std::vector< pointToClause* > >& occurlist );
+
+	// Helper functions for "variableElimination"
+	unsigned int mergeClauses ( pointToClause* ptc1, pointToClause* ptc2, unsigned int reslit, std::vector< unsigned int >& result ) const;
+	unsigned int mergeClauses ( pointToClause* ptc, unsigned int reslit, unsigned int otherlitpos, std::vector< unsigned int >& result ) const;
+	unsigned int countMergeClauses ( pointToClause* c1, pointToClause* c2, unsigned int reslit ) const;
+	unsigned int countMergeClauses ( pointToClause* c, unsigned int reslit, unsigned int otherlit ) const;
+	unsigned int countMergeCubes ( pointToClause* c1, pointToClause* c2, unsigned int reslit ) const;
+    int estimateCosts ( unsigned int var ) const;
+	int estimateCosts2 ( unsigned int var ) const; 
+	int estimateCubeCosts ( unsigned int var, const std::vector< std::vector< pointToClause* > >& cubeoccur ) const;
+
+	// Helper subsumption functions
+	bool isForwardSubsumed( const std::vector< unsigned int >& clause, unsigned int sign ) const;
+	bool cubeIsForwardSubsumed( const std::vector< unsigned int >& clause, unsigned int sign, const std::vector< std::vector< pointToClause* > >& cubeoccur ) const;
+	void backwardSubsumption( pointToClause* clause, std::vector< pointToClause* >& subsumedclauses );
+	bool isSubsumed( const std::vector< unsigned int >& clause, const unsigned int& size, const unsigned int& sign ) const;
+	bool isSubsumed( pointToClause* ptc);
+	bool subsuming( pointToClause* ptc );
+	bool checkBinSub( unsigned int i1, unsigned int i2, bool islearned );
+	bool cubeSubsumption( void );
+	bool isSubsumedCube( pointToClause* ptc, std::vector< std::vector< pointToClause* > >& cubeoccur );
+
+	// Helper functions for UPLA
+	bool deduceUPLA( std::vector< std::vector< unsigned int > >& uplaWatches, const std::vector< unsigned int* >& uplaDatabase );
+	void addDecisionUPLA( unsigned int lit );
+	void addImplicationUPLA( unsigned int lit );
+	void backtrackUPLA( unsigned int bl );
+
+	// End preprocessing functions
+	
+	// Boolean constraint propagation
+	unsigned int* deduce ( bool checkpure = true );
+	unsigned int* deduceBin ( unsigned int& bbcpp );
+	unsigned int* deduceBinLearned ( unsigned int& blbcpp, unsigned int& lhbrstart );
+	unsigned int* deduceBinNoLHBR ( unsigned int& bbcpp );
+	unsigned int* deduceBinLearnedNoLHBR ( unsigned int& blbcpp );
+	unsigned int* deduceNary ( unsigned int& nbcpp );
+	unsigned int* deduceLearned ( unsigned int& lbcpp );
+	unsigned int* deduceCubes ( unsigned int& cbcpp );
+
+	// conflict analysis
+#ifdef COMBSOLVER
+	bool analyzeAIG( Implications& impl );
+	bool analyze ( unsigned int* conflictingClause, unsigned int curlevel = 0, Implications impl = Implications(-1) );
+#else
+	bool analyze ( unsigned int* conflictingClause, unsigned int curlevel = 0 );
+#endif
+
+	// solution analysis
+	bool solution_analysis ( void );
+#ifdef COMBSOLVER
+	bool solution_analysis2 ( Implications impl = Implications(-1) );
+#else
+	bool solution_analysis2 ( void );
+#endif
+	void checkSolution( void );
+#if 0
+	bool solution_analysis3 ( quantom::Quantom& myQuantom2 );
+#endif
+	// solution analysis helper functions
+	bool safeToMarkDC( unsigned int dclit ) const;
+	bool compareSolLit(unsigned int lit1, unsigned int lit2) const;
+	void initSolOrder( void );
+
+	// conflicht/solution analysis for lifting
+	void analyzeLifting (unsigned int* conflictingClause );
+	bool solution_lifting(  std::vector< std::pair< unsigned int, unsigned int > >& actvector );
+	// lifting helper functions
+	void getCompleteImplGraph( const std::vector< unsigned int >& conflictingClause );
+	void collectLitImplications ( unsigned int lit, std::vector< std::vector< std::vector< unsigned int > > >& implications, std::vector< std::vector< std::vector< unsigned int > > >& imploccur );
+	void getInputToOutputImpl( std::vector< std::vector< std::vector< unsigned int > > >& implications,  std::vector< std::vector< std::vector< unsigned int > > >& imploccur );
+	void mergeImplications( std::vector< unsigned int >& clause, std::vector< std::vector< std::vector< unsigned int > > >& implications );
+	unsigned int negateCNF( quantom::Quantom& myQuantom2 );
+#if 0
+	aigpp::EdgeRef getAIGVar( unsigned int v, aigpp::Manager& aig, std::vector< bool >& varCreated, std::vector< aigpp::EdgeRef >& varMap );
+	aigpp::EdgeRef createAIG( const std::vector< unsigned int >& clause, aigpp::Manager& aig, std::vector< bool >& varCreated, std::vector< aigpp::EdgeRef >& varMap );
+#endif
+
+	bool checkSubsumption( bool selfsubsumption = false );
+
+	// Pure literal helper funtions
+	bool detectPure ( unsigned int& pbcpp, std::set< unsigned int>& candidates, bool checkpure = true );
+	void setNewPureWatch( unsigned int lit, unsigned int pos );
+	void markClauses( unsigned int& pbcpp );
+    bool checkPureCandidates( std::set< unsigned int >& candidates );
+	void detectDC( void );
+    bool setupLitLists ( bool checkpure = true );
+
+// Some Comb solver methods, defined in export.cc
+#ifdef COMBSOLVER
+	qbf::LBool exportAIGQBF( Implications& impl );
+	void updateresets( bool startsolving );
+	unsigned int* checkimpl( const Implications& impl );
+	void addSolution( const std::vector<int>& partsol );
+	void addLearnedClause( const qbf::Instance& aiginst, Implications& impl );
+#endif
+
+	/* constructor */
+	Core(const Core& );
+	Core& operator=(const Core& );
+
+    // Each core has a pointer to the "Control" object.
+    Control* m_control;
+
+	/* data members */
+
+	// A flag indicating whether we have been able to deduce the empty clause.
+	// In particular important for the increemntal mode to distinguish between
+	// "unsatisfiable" and "unsatisfiable under assumptions". 
+	bool m_emptyClause;
+
+	// Store the return result of the solver
+	unsigned int m_result;
+
+	// The total runtime 
+	double m_runtime;
+
+	// The current number of variables.
+	unsigned int m_variables; 
+
+	// Maximum original var (variables except auxiliary variables for maximization)
+	unsigned int m_maxorgvar;
+
+	// The number of decisions made so far.
+	unsigned int m_decisions; 
+
+	// The number of BCP operations performed so far. 
+	unsigned int m_bcps; 
+
+	// The number of conflicts encountered so far.
+	unsigned int m_conflicts; 
+
+	// The number of restarts performed so far.
+	unsigned int m_restarts;
+	unsigned int m_restartAttempts;
+	unsigned int m_currentRestarts;
+
+	// The number of database simplifications performed so far.
+	unsigned int m_simplifications;
+	unsigned int q_simplifications;
+
+	// The number of literals implied on dl 0 at the last simplification step
+	unsigned int m_lastSimplifyCount;
+
+	int q_slbd;
+
+	// The (partial) variable assignment.
+	std::vector<unsigned char> m_assignment;
+
+	// Store preferences for lits.
+	std::vector<unsigned int> m_polarity;
+
+	// Store weights for lits.
+	std::vector<unsigned int> m_weight;
+
+	// The assignment cache.
+	std::vector<unsigned char> m_cache;
+
+	double m_agility;
+	bool m_useAgility;
+	double m_agilityThreashold;
+
+	// The decision level on which a particular literal has been assigned.
+	std::vector<unsigned int> m_level; 
+
+	// For each variable we store its activity.
+	std::vector<double> m_activity;  
+	std::vector<unsigned int > m_activity2;
+	std::vector<unsigned int > m_activity3;
+
+	// For each variable we store whether it is 
+	// -- an implication forced by a non-binary clause (m_forcing != NULL, m_binForcing == 0), 
+	// -- an implication forced by a binary clause (m_forcing == NULL, m_binForcing != 0), or
+	// -- a decision (m_forcing == NULL, m_binForcing == 0). 
+	std::vector<unsigned int*> m_forcing;
+	std::vector<unsigned int> m_binForcing;
+
+	// For each literal we store a vector of pairs (clause pointer, blocking literal) to represent 
+	// in which clause a particular literal currently serves as a watched literal.
+	// For quantom:
+	// Only a clauseobject will be stored, which contains the watched literals
+	std::vector<std::vector< pointToClause* > > m_watches;
+
+	// Store watched literals for learned clauses separatly
+	std::vector<std::vector< pointToClause* > > m_learnedWatches;
+
+	// Store watched literals for cubes separatly
+	std::vector<std::vector< pointToClause* > > q_cubeWatches;
+
+	// For each literal we store a vector of literals to represent in which binary clauses it occurs.
+	// (x, y) --> m_binWatches[x] = {...,y,...} and m_binWatches[y] = {...,x,...}.
+	std::vector<std::vector<unsigned int> > m_binWatches;
+
+	// Stores for each variable the index at which the learned clauses starts.
+	std::vector< unsigned int > m_binWatchesLearnedIndex;
+
+	// Some variable activity related variables.
+	double m_incVarActivity;
+	double m_varActMultiplier;
+
+	// The current decision level.
+	unsigned int m_decisionLevel; 
+
+	// The root level of the current (incremental) run.
+	unsigned int m_rootLevel;
+
+	// The decision stack.
+	std::vector<unsigned int> m_decisionStack;
+
+	// Some decision stack related variables.
+	unsigned int m_dsEndIndex;
+	unsigned int m_dsImplIndex;
+	unsigned int q_dsPropIndex;
+	bool m_newDecision;
+
+	// Some conflict analysis related variables. Setting "m_binConflict" to (x, y) 
+	// represents, that we have a conflict due to the binary conflicting clause (x, y).
+	unsigned int m_binConflict[2];
+
+	// The luby shift constant
+	unsigned int m_lubyShift;
+
+	// Some restart / clause deletion related variables.
+	unsigned int m_nxtRestarti;
+	unsigned int m_nxtRestarto;
+	unsigned int m_innercounter;
+	unsigned int m_outercounter;
+	unsigned int m_nxtRestart;
+
+	unsigned int m_ccs;
+
+	// Some decision heuristic related variables.
+	bool m_decVarSign;
+	bool m_switchVarSign;
+
+	// The satisfying variable assignment of the outermost quant
+	// level(in case the CNF formula is satisfiable; otherwise
+	// "m_model" might contain invalid data).
+	std::vector<unsigned int> m_model;
+
+	// last conflict clause
+	std::vector<unsigned int> m_conflictClause;
+
+	// Storing temporaly solution cubes
+	std::vector< unsigned int > q_solutioncube;
+
+	// For quantom: we have an extra object for clauses
+	std::vector< pointToClause* > m_clauseDatabase;
+
+	// Store solution cubes - have to be treated like clauses (dual)
+	std::vector< pointToClause* > q_solutionDatabase;
+
+	// Open clause id's
+	std::vector< unsigned int > m_openIDs;
+
+	// candiates for simplification
+	std::vector< pointToClause* > m_candidates;
+
+	bool q_multiplexed;
+
+	// Some statistics of the formula
+	unsigned int m_literals;
+	unsigned int m_clauses;
+	unsigned int m_clausesBinary;
+	unsigned int m_clausesStatic;
+	unsigned int m_clausesStaticBinary;
+	unsigned int m_clausesDynamic;
+	unsigned int m_clausesDynamicBinary;
+	unsigned int m_cubes;
+	unsigned int m_clauselength;
+	unsigned int m_clauseIDs;
+   	double m_avgGlobalDL;
+	double m_avgLocalDL;
+	unsigned int m_avgGlobalBTlevel;
+	unsigned int m_avgLocalBTlevel;
+	unsigned int q_solutions;
+	unsigned int q_purelits;
+	unsigned int q_dontcare;
+	//  0: touched bin
+	//  1: conflicts by bin
+	//  2: implication by bin
+	//  3: touched learned bin
+	//  4: conflicts by learned bin
+	//  5: implication by learned bin
+	//  6: touched by nary clause
+	//  7: conflicts by nary clause
+	//  8: implication by nary clause
+	//  9: touched learned nary clause
+	// 10: conflicts by learned nary clause
+	// 11: implication by learned nary clause
+	// 12: touched cube
+	// 13: conflicts by cube
+	// 14: implication by cube
+	std::vector< unsigned int > m_bcpstats;
+
+	bool m_forward;
+
+	/* store reason for decision:
+	   0x0 : not assigned or branched literal
+	   0x1 : unit literal
+	   0x2 : pure literal
+	   0x4 : don't care literal
+	   needed for pure literal detection + conflict/solution analysis
+	*/
+	std::vector< unsigned int > q_reason;
+
+	//current quantlevel for decision
+	unsigned int q_decision;
+
+	// Maximum q_level
+	unsigned int q_maxqlevel;
+
+	//minimum quant level;
+	unsigned int q_minqlevel;
+
+	// Maximum Radix, needed by sort algorithms
+	unsigned int q_maxradix;
+
+	unsigned int q_cachedImplIndex;
+	
+	// The variable ordering used by the decision heuristic.
+	// For quantom we need a ordering for every quantlevel
+	std::vector< VarHeap<double>* > q_varOrder;
+	std::vector< VarHeap<unsigned int>* > q_varOrder2;
+
+	// average lbd values for clauses and cubes
+	unsigned int m_tlbd;
+	unsigned int m_ttlbd;
+	bool q_skiplearning;
+	bool q_togglelearning;
+	
+	// Some parameters for the heuristics
+	unsigned int m_ip;
+	unsigned int m_decHeu;
+	unsigned int m_restartHeu;
+	bool m_resetHeu;
+	bool m_cacheswap;
+	bool m_lhbr;
+	bool q_mincube;
+	bool q_subsumption;
+	bool q_nextsubsumption;
+	bool q_upla;
+	bool q_varelim;
+	bool q_quantmerge;
+	unsigned int m_recalcDecHeu;
+	unsigned int m_lhbrclauses;
+	unsigned int q_solutionorder;
+	unsigned int q_soltype;
+ 
+	// quantlevel of each variable 
+	// odd: existential, even: universal, starting with 1
+	std::vector< unsigned int > q_level;
+
+	// occurencelist pointing to corresponding clauses of the literals
+	// occurencelists exists only for the original clause set.
+	std::vector< std::vector< pointToClause* > > q_occur;
+
+	// Preprocessor data structures
+
+	// Don't touch list
+	std::vector< bool > m_donttouch;
+
+	// did we deleted a variable ?
+	std::vector< bool > q_deleted;
+
+	// did we have replaced a variable in preprocessor? 
+    // the replacing literal is given for each variable, "0" if variable was not replaced
+    // information needed for model
+	std::vector< std::vector< unsigned int > > q_replaces;
+
+	// Literals by level map
+	std::vector< std::vector< unsigned int > > q_litbylevel;
+
+	// Store assumptions
+	std::vector< unsigned int > q_assumptions;
+
+	// Status variables
+	bool q_solve;
+	bool q_prepro;
+	bool q_inpro;
+	bool q_newunit;
+
+	bool q_refreshVarorder;
+	std::vector< unsigned int > q_elimclauses;
+
+	// Pre/In-prpocessor statistics
+	unsigned int q_inprocessings;
+	unsigned int q_subsumptions;
+	unsigned int q_selfsubsumptions;
+	unsigned int q_monolits;
+	unsigned int q_dclits;
+	unsigned int q_cons;
+	unsigned int q_equiv;
+    unsigned int q_uplacons;
+    unsigned int q_uplaequiv;
+	unsigned int q_reslits;	
+	unsigned int q_mergedLevels;
+	unsigned int q_deletedLevels;
+	unsigned int q_unitprop;
+
+	// Lifting mode?
+	unsigned int q_liftingmode;
+
+	// Backtracklevel for lifting
+	unsigned int q_backtracklevel;
+
+	// The cube units
+	std::vector< unsigned int > q_unitcubes;
+
+	// Verbosity value
+	unsigned int m_verbosity;
+
+#ifdef COMBSOLVER
+	/* some data for combined solver */
+
+	// number of orginal n-nary clauses
+	unsigned int e_orgclauses;
+ 	unsigned int e_counter;
+	unsigned int e_lastcount;
+	bool e_toggleexport;
+	bool e_togglerestart;
+	bool e_nowexport;
+	int e_switching;
+	int e_startswitching;
+	unsigned int e_switchcount;
+	unsigned int e_nxtexport;
+	unsigned int e_aigsat;
+	unsigned int e_aigunsat;
+	unsigned int e_learnedaigclause;
+	double e_aigtimeout;
+	int e_aigsollevel;
+	double e_starttime;
+#endif
+	};
+}
+
+#endif

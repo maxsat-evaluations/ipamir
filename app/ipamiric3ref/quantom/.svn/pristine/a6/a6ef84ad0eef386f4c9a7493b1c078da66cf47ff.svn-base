@@ -1,0 +1,727 @@
+#include "core.hpp"
+
+#ifdef COMBSOLVER
+
+namespace quantom {
+
+  qbf::LBool Core::exportAIGQBF( Implications& impl )
+  {
+#ifdef EXPORTDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+#ifdef EXPORTDEBUG
+	printdatabase();
+#endif
+
+	bool startsolving = false;
+
+	qbf::Instance aiginst;
+	qbf::StructuredSolver_AIG solver;
+
+    qbf::Solution2* solution = 0;
+    qbf::Solution2 realSolution;
+	solution = &realSolution;
+	aiginst.setSolution( solution );
+	int noclauses(0);
+
+	std::vector<std::pair<qbf::Quantor, std::vector<int> > > prefix;
+	std::vector<std::vector<int> > matrix;
+
+	try { 
+
+	  unsigned int largestlit(0);
+
+	  std::cout << "litbylevel: " << std::endl;
+	  for( unsigned int i = 0; i != q_litbylevel.size(); ++i )
+		{
+		  std::cout << i << " ";
+		  for( unsigned int j = 0; j != q_litbylevel[i].size(); ++j )
+			{std::cout << getLit(q_litbylevel[i][j]) << " ";}
+		  std::cout << std::endl;
+		}
+
+	  qbf::Quantor quantor = qbf::Existential;
+	  for( unsigned int i = 0; i != q_litbylevel.size(); ++i )
+		{
+		  if( (i&1) == 0 )
+			{ quantor = qbf::Existential; }
+		  else 
+			{ quantor = qbf::Universal; }
+
+		  std::vector< int > variables;
+		  for( unsigned int j = 0; j != q_litbylevel[i].size(); ++j )
+			{
+			  if ( m_assignment[Lit(q_litbylevel[i][j])] || m_assignment[Lit(q_litbylevel[i][j])^1] )
+				{ continue; }
+			  variables.push_back( (Lit(q_litbylevel[i][j])>>1) );
+			  std::cout << "add " << (Lit(q_litbylevel[i][j])>>1) << std::endl;
+			  largestlit = q_litbylevel[i][j]>>1;
+			}
+
+		  if( !variables.empty() )
+			{
+			  std::cout << "push vector " << std::endl;
+			  prefix.push_back( std::make_pair(quantor, variables ) );
+			}
+		}
+
+	  if( largestlit == 0 )
+		{ 
+#ifdef EXPORTDEBUG
+		  std::cout << "trivially SATisfied" << std::endl;
+#endif
+		  return qbf::LTrue;
+		}
+
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+		  /* skip assigned or not occuring variables */
+		  if( m_assignment[v<<1] || m_assignment[ (v<<1)+1 ] )  
+			{ continue; }
+
+		  int var = (v<<1);
+		  std::vector< unsigned int > binwatch = m_binWatches[ var ];
+		  unsigned int learnedindex = m_binWatchesLearnedIndex[ var ];
+
+		  for( unsigned int i = 0; i < learnedindex; ++i )
+			{
+			  std::cout << "proceed " << (var>>1) << " [" << assignedTo(var) << "] " << getLit(binwatch[i]) << " [" << assignedTo(binwatch[i]) << std::endl;
+			  if( ( (Lit(binwatch[i])>>1) > v )&& !m_assignment[Lit(binwatch[i])] )
+				{
+				  std::vector< int > tmpclause;
+				  tmpclause.push_back(var-2);
+				  int seclit = (int)(Lit(binwatch[i])-2);
+				  tmpclause.push_back(seclit);
+#ifdef EXPORTDEBUG
+				  std::cout << "push clause: " << tmpclause[0] << " " << tmpclause[1]  << std::endl;
+#endif
+				  matrix.push_back(tmpclause);
+				  ++noclauses;
+				}
+			}
+
+		  var = (v<<1)^1;				
+		  binwatch = m_binWatches[ var ];
+		  learnedindex = m_binWatchesLearnedIndex[ var ];
+
+		  for( unsigned int i = 0; i != learnedindex; ++i )
+			{
+			  std::cout << "proceed -" << (var>>1) << " [" << assignedTo(var) << "] " << getLit(binwatch[i]) << " [" << assignedTo(binwatch[i]) << std::endl;
+			  if( ( (Lit(binwatch[i])>>1 ) )> v && !m_assignment[Lit(binwatch[i])] )
+				{
+				  std::vector< int > tmpclause;
+				  tmpclause.push_back(var-2);
+				  int seclit = (int)(Lit(binwatch[i])-2);
+				  tmpclause.push_back(seclit);
+#ifdef EXPORTDEBUG
+				  std::cout << "push clause: " << tmpclause[0] << " " << tmpclause[1] << std::endl;
+#endif
+				  matrix.push_back(tmpclause);
+				  ++noclauses;
+				}
+			}
+
+		}
+
+	  unsigned int dbsize( m_clauseDatabase.size() );
+
+	  /* now collect all n-ary clauses of the original problem */
+	  for(unsigned int i = 0; i != dbsize; ++i )
+		{
+		  pointToClause* ptc = m_clauseDatabase[i];
+		  std::vector<int> tmpclause;
+
+		  if( m_assignment[ptc->wl0] || m_assignment[Lit(ptc->wla)] || ptc->lbd() > 1 )
+			{ continue; }
+
+		  std::set<int> reason;
+		  unsigned int* lits(ptc->clause());
+		  unsigned int pos(0);
+		  while( lits[pos] != 0 )
+			{
+			  assert( !m_assignment[Lit(lits[pos])] );
+
+			  if( !m_assignment[Lit(lits[pos])^1] )
+				{ 
+				  tmpclause.push_back( (int)(Lit(lits[pos])-2) ); 
+				}
+#if 0
+			  else if( m_level[ Lit(lits[pos])>>1] != 0 )
+				{
+				  reason.insert( lits[pos] );
+				}
+#endif
+			  ++pos;
+			}
+#ifdef EXPORTDEBUG
+		  std::cout << std::endl;
+		  std::cout << "PUSH clause " << std::endl;
+		  for( unsigned int f = 0; f != tmpclause.size(); ++f )
+			{
+			  std::cout << tmpclause[f] << std::endl;
+			}
+#endif
+
+		  assert(tmpclause.size()>1);
+
+		  matrix.push_back(tmpclause);
+		  ++noclauses;
+		}
+
+#ifdef EXPORTDEBUG
+	  std::cout << "export: "<< std::endl;
+	  for( unsigned int p = 0; p != prefix.size(); ++p )
+		{
+		  std::cout << ((prefix[p].first == qbf::Existential)?"e ":"a ");
+		  for( unsigned int j = 0; j != prefix[p].second.size(); ++j )
+			{ std::cout << prefix[p].second[j] << " "; }
+		  std::cout << "0" << std::endl;
+		}
+	  for (unsigned int m = 0; m != matrix.size(); ++m )
+		{
+		  for( unsigned int j = 0; j != matrix[m].size(); ++j )
+			{
+			  std::cout << getLit(matrix[m][j]) << " ";
+			}
+		  std::cout << "0" << std::endl;
+		}
+	  std::cout << std::endl;
+#endif
+	  aiginst.load(prefix, matrix);
+				  			  
+	  std::pair<qbf::Quantor, std::vector<int> > lowestLevel = aiginst.getLowestLevel();
+	  
+	  std::cout << ((lowestLevel.first == qbf::Existential)?"e ":"a ");
+	  for(unsigned int i = 0; i != lowestLevel.second.size(); ++i )
+		{
+		  std::cout << lowestLevel.second[i] << " ";
+		}
+	  std::cout << std::endl;
+				  
+	  if( lowestLevel.first == qbf::Existential )
+        {
+		  solution->setSolutionVariables( lowestLevel.second );
+        }
+#ifdef EXPORTDEBUG
+	  else
+        {
+		  std::cout << "INFO: lowest level is universal!" << std::endl;
+        }
+#endif
+
+	  
+#ifdef EXPORTDEBUG
+	  aiginst.setVerbosity(5);
+	  std::stringstream file;
+	  file << "instance_" << e_counter;
+	  std::ofstream osnap(file.str().c_str());
+	  aiginst.write( osnap );
+#endif
+
+	  e_starttime = lrabs::cpuTime();
+
+#ifdef PREPRO
+#ifdef OUTPUT
+	  std::cout << "p";
+#endif
+
+	  // TODO
+	  //aiginst.preprocessSolutionExport();
+	  //TODO addLearnedClause(aiginst, impl);
+
+#endif
+
+#ifdef EXPORTDEBUG
+	  std::cout << "instance_" << e_counter << std::endl;
+	  std::stringstream filepre;
+	  filepre << "instance_" << e_counter << "_pre";
+	  std::ofstream osnappre( filepre.str().c_str());
+
+	  aiginst.write( osnappre );
+#endif
+
+	  struct rusage aigres;
+	  getrusage(RUSAGE_SELF, &aigres);
+	  double pretime = ( (double) aigres.ru_utime.tv_sec + 1.e-6 * (double) aigres.ru_utime.tv_usec );
+	  if( (pretime - e_starttime) > e_aigtimeout )
+		{ throw qbf::TimedException(); }
+
+	  aiginst.detectGates();
+
+	  solver.setInstance( aiginst );
+	  solver.calculateSupports();
+	  aiginst.checkTimeout();
+	  solver.earlyQuantificationPre();
+      aiginst.checkTimeout();
+      solver.detectStructure();
+	  aiginst.checkTimeout();
+	  solver.stripExistentialPrefix();
+	  aiginst.checkTimeout();
+	  solver.mergeQuantifiers();
+	  aiginst.checkTimeout();
+
+	  pretime = ( (double) aigres.ru_utime.tv_sec + 1.e-6 * (double) aigres.ru_utime.tv_usec );
+	  if( (pretime - e_starttime) > e_aigtimeout )
+		{ throw qbf::TimedException(); }
+
+
+#ifdef EXPORTDEBUG
+	  std::stringstream aigstr;
+	  aigstr << "struct_" << e_counter;
+	  std::cout << "dumping structure to " << aigstr.str() << std::endl;
+	  std::ofstream strfile(aigstr.str().c_str());
+	  solver.printStructure( strfile, false, false );
+#endif
+
+	  startsolving = true;
+      solver.solveScheduled( /*e_starttime, e_aigtimeout*/ );
+
+	} catch ( qbf::SATException& e )
+	  { 
+#ifdef OUTPUT
+		std::cout << "s";
+#endif
+
+		updateresets( startsolving );
+
+		if( !startsolving )
+		  { 
+				  //TODO addLearnedClause(aiginst, impl); 
+		  }
+
+        if( solution != 0 )
+        {
+            solution->finalize();
+            std::cout << "c solution:" << std::endl;
+            solution->print( std::cout );
+			addSolution( solution->getSolution() );
+        }
+		
+#ifdef EXPORTDEBUG
+		std::stringstream sol;
+		sol << "sol_" << e_counter;
+		std::cout << "dumping solution to " << sol.str() << std::endl;
+		std::ofstream solfile(sol.str().c_str());
+#endif
+
+#ifdef EXPORTDEBUG
+		std::stringstream aig;
+		aig << "aig_" << e_counter;
+		std::cout << "dumping aig to " << aig.str() << std::endl;
+		std::ofstream aigfile(aig.str().c_str());
+		solver._man.dumpGraphViz( aigfile, true );
+#endif
+
+		return qbf::LTrue; 
+	  }
+	catch (qbf::UNSATException& e )
+	  {
+#ifdef OUTPUT
+		std::cout << "u";
+#endif
+
+		updateresets( startsolving );
+		
+		if( !startsolving )
+		  { 
+			//TODO addLearnedClause(aiginst, impl); 
+		  }
+
+
+		return qbf::LFalse; 
+	  }
+	catch (qbf::TimeoutException& e  )
+	  {
+#ifdef OUTPUT
+		std::cout << "t";
+#endif
+		updateresets( startsolving );
+
+		if( !startsolving )
+		  { 
+			//TODO addLearnedClause(aiginst, impl); 
+		  }
+
+		return qbf::LUnknown; 
+	  }
+	
+	return qbf::LUnknown;
+  }
+  
+  unsigned int* Core::checkimpl( const Implications& impl )
+  {
+#ifdef EXPORTDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+	assert( impl.backtracklevel >= 0 );
+	
+	//	if( impl.backtracklevel < 0 ) 
+	//  { return; }
+
+#ifdef EXPORTDEBUG
+	std::cout << "backtrack to lv " << impl.backtracklevel << std::endl;
+#endif
+	if( impl.backtracklevel < (int)m_decisionLevel )
+	  { backtrack( impl.backtracklevel ); }
+
+	for( std::vector< std::pair<unsigned int, unsigned int> >::const_iterator it = impl.units.begin(); it != impl.units.end(); ++it )
+	  {
+		// if the backtracklevel of the learnt clause is larger than the current decisionlevel, it cannot be implied
+#ifdef EXPORTDEBUG
+		std::cout << "unit: " << getLit(it->first) << std::endl;
+#endif
+		if( it->second > m_decisionLevel || m_assignment[Lit(it->first)] ) 
+		  { continue; }
+
+		if( m_assignment[Lit(it->first)^1] )
+		  { 
+			std::cout << "WARNING: try to set literal twice -> skip learned clause" << std::endl;
+			continue;
+		  }
+
+		assert( it->second == m_decisionLevel );
+		
+		setUnit(it->first);
+
+		std::map<unsigned int, unsigned int>::const_iterator bit = impl.binimpl.find(it->first);
+		if( bit != impl.binimpl.end() )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "add bin implication: " << getLit(it->first) << " [" << assignedTo(it->first) << "] " << getLit(bit->second) << " [" << assignedTo(bit->second) << "] on dllevel: " << impl.backtracklevel << std::endl;
+#endif
+			addBinImplication(it->first, bit->second);
+			unsigned int* conflict = deduce();
+			if( conflict != NULL )
+			  { return conflict; }
+		  }
+		else 
+		  {
+			std::map<unsigned int, pointToClause*>::const_iterator cit = impl.naryimpl.find(it->first);
+			if( cit != impl.naryimpl.end() )
+			  {
+#ifdef EXPORTDEBUG
+				std::cout << "add implication: ";
+				printClause(cit->second);
+				std::cout << " on dllevel: " << impl.backtracklevel << std::endl;
+#endif
+				addImplication(it->first, cit->second->clause());
+
+				unsigned int* conflict = deduce();
+				if( conflict != NULL )
+				  { return conflict; }
+			  }
+			else
+			  {
+#ifdef EXPORTDEBUG
+				std::cout << "add unit clause: " << getLit(it->first) << " [" << assignedTo(it->first) << "] on dllevel: " << impl.backtracklevel << std::endl;
+#endif
+				//m_unitClauses.push_back(it->first); 
+				addImplication(it->first, NULL );
+
+				unsigned int* conflict = deduce();
+				if( conflict != NULL )
+				  { return conflict; }
+			  }
+		  }
+	  }
+	return NULL;
+  }
+
+#if 0
+  void Core::addLearnedClause(const qbf::Instance& aiginst, Implications& impl )
+  {
+	unsigned int newunits(0);
+	unsigned int newbins(0);
+	unsigned int newclauses(0);
+	
+	//std::cout << "learned units: " << std::endl;
+	for(unsigned int i = 0; i != aiginst._learnedStuff.size(); ++i)
+	  {
+#ifdef EXPORTDEBUG
+		std::cout << "produce conflict clause of unit: " << qbf::Index2QDimacs(aiginst._learnedStuff[i].unit) << std::endl;
+#endif
+
+		std::vector<unsigned int> lits;
+		unsigned int maxeqlevel(0);
+		unsigned int esize(0);
+
+		if( aiginst._learnedStuff[i].trigby >= 0 )
+		  { 
+			unsigned int pseudolit = aiginst._learnedStuff[i].unit+2;
+		
+			impl.pseudoimpl.push_back( pseudolit );
+			continue; 
+		  }
+
+#ifdef EXPORTDEBUG
+		std::cout << "reasons: " << std::endl;
+#endif
+		for( std::set< int >::const_iterator j = aiginst._learnedStuff[i].reason.begin(); j != aiginst._learnedStuff[i].reason.end(); ++j )
+		  {
+
+#ifdef EXPORTDEBUG
+			std::cout << *j << " ";
+#endif
+			lits.push_back(*j);
+
+			if( !isUniversal(*j) )
+			  { ++esize; }
+
+			if( q_level[Lit(*j)>>1] > maxeqlevel )
+			  { maxeqlevel = q_level[Lit(*j)>>1]; }
+
+		  }
+#ifdef EXPORTDEBUG
+		std::cout << std::endl;
+#endif
+
+		unsigned int uip = aiginst._learnedStuff[i].unit + 2;
+
+		/* the uip is possibly universal -> skip clause 
+		   TODO: keep clause with special treatment
+		 */ 
+		if( (q_level[uip>>1]&1) == 0 )
+		  { continue; }
+
+		assert( m_level[uip>>1] == 0 );
+		  
+		if( q_level[Lit(uip)>>1] > maxeqlevel )
+		  { maxeqlevel = q_level[Lit(uip)>>1]; }
+
+		unsigned int size(lits.size());
+
+		sortClauseEU(lits, size, maxeqlevel);
+
+#ifdef EXPORTDEBUG
+		printClause(lits);
+		std::cout << std::endl;
+#endif
+
+		if ( size == 0 )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "emptyclause with uip " << getLit(uip) << std::endl;
+#endif
+
+			//m_unitClauses.push_back(uip); 
+			  
+			impl.units.push_back(std::pair<unsigned int, unsigned int>( uip, m_rootLevel ) );
+			impl.backtracklevel = m_rootLevel;
+			impl.unitclause = true;
+			m_incVarActivity *= m_varActMultiplier;
+			++newunits;
+		  }
+		else if( size == 1 )
+		  {
+			
+#ifdef EXPORTDEBUG
+			std::cout << "ana-binclause: " << getLit(uip) << " [" << assignedTo(uip) << "] mlevel: " << m_level[uip>>1] << " (" << uip << ") " << getLit(lits[0]) << " [" << assignedTo(lits[0]) << "] lv: " << m_level[Lit(lits[0])>>1] << std::endl;
+#endif
+
+			m_binWatches[uip].push_back(lits[0]);
+			m_binWatches[Lit(lits[0])].push_back(uip);
+			unsigned int slevel = m_level[Lit(lits[0])>>1];
+
+			if( slevel == 0 )
+			  { impl.units.push_back(std::pair<unsigned int, unsigned int>( uip, m_decisionLevel ) ); }
+			else
+			  {	impl.units.push_back(std::pair<unsigned int, unsigned int>( uip, slevel ) ); }
+			  
+			if( impl.backtracklevel > (int)m_level[Lit(lits[0])>>1] )
+			  { impl.backtracklevel = m_level[Lit(lits[0])>>1]; }
+		
+			impl.binimpl[uip] = (int)lits[0];
+
+			m_incVarActivity *= m_varActMultiplier;
+			increaseActivityDLCS(uip>>1);
+			increaseActivityDLCS(Lit(lits[0])>>1);
+			increaseActivityQuBE(uip);
+			increaseActivityQuBE(Lit(lits[0]));
+
+			++newbins;
+		  }
+		else
+		  {
+			unsigned int minbtlevel(0);
+			unsigned int lbd(0);
+			unsigned int at(size);
+			bool dontimply = false;
+
+			std::vector<bool> level;
+			level.resize(m_decisionLevel + 1, false);
+
+			for( unsigned int i = 0; i != size; ++i )
+			  {
+#ifdef EXPORTDEBUG
+				std::cout << getLit(lits[i]) << " mlevel: " << m_level[Lit(lits[i])>>1];
+#endif
+				if( m_level[Lit(lits[i])>>1] == 0 )
+				  {
+					dontimply = true;
+					if(!isUniversal(lits[i]) )
+					  { 
+						at = i; 
+#ifdef EXPORTDEBUG
+						std::cout << " new backtrackpos: " << i;
+#endif
+					  }
+				  }
+				if( m_level[Lit(lits[i])>>1] > minbtlevel )
+				  {
+					minbtlevel = m_level[Lit(lits[i])>>1];					  
+#ifdef EXPORTDEBUG
+					std::cout << " new btlevel: " << minbtlevel;
+#endif
+					if(!isUniversal(lits[i]) )
+					  { 
+						at = i; 
+#ifdef EXPORTDEBUG
+						std::cout << " new backtrackpos: " << i;
+#endif
+					  }
+				  }
+#ifdef EXPORTDEBUG
+				std::cout << std::endl;
+#endif
+				// Do we have to update the "Literals Blocks Distance"?
+				if (!level[m_level[Lit(lits[i]) >> 1]])
+				  {
+					level[m_level[Lit(lits[i]) >> 1]] = true;
+					++lbd;
+				  }
+			  }
+
+			assert( at != size || isUniversal(lits[0]) );
+			if( at != size )
+			  { iter_swap(lits.begin(), lits.begin() + at); }
+
+			unsigned int* cptr(new unsigned int[size+2]); 
+			pointToClause* ptc = new pointToClause( cptr, size, esize+1, size+1 );
+		  
+			cptr[0] = uip;
+			//std::cout << getLit(cptr[0]) << "* [" << assignedTo(cptr[0]) << "] ";
+		  
+			increaseActivityDLCS(uip>>1);
+			increaseActivityQuBE(uip);
+
+			unsigned int q(1);
+			for (unsigned int l = 0; l < size; ++l)
+			  {
+				cptr[q++] = lits[l]; 
+
+				increaseActivityDLCS(Lit(lits[l])>>1);
+				increaseActivityQuBE(Lit(lits[l]));
+				//std::cout << getLit(lits[l]) << " [" << assignedTo(lits[l]) << "] ";
+			  
+			  }
+			//std::cout << std::endl;
+			cptr[q] = 0;
+			ptc->setWatches();
+		  
+			//std::cout << "set watches: " << std::endl;
+
+			// Update "m_watches".
+			m_learnedWatches[Lit(cptr[0])].push_back(ptc);
+  
+			//std::cout << "set watch for: " << getLit(cptr[0]) << std::endl;
+  	   
+			if( esize != 0 )
+			  {
+				m_learnedWatches[Lit(cptr[1])].push_back(ptc); 
+				  
+				//std::cout << "set watch for: " << getLit(cptr[1]) << std::endl;
+			  }
+
+			if( esize < size ) 
+			  { 
+				m_learnedWatches[Lit(cptr[esize+1])].push_back(ptc); 
+				//std::cout << "set watch for: " << getLit(cptr[esize+1]) << std::endl;
+			  }
+			m_clauseDatabase.push_back(ptc);  
+#ifdef EXPORTDEBUG
+			printClause(ptc);
+			std::cout << "lv: " << minbtlevel << std::endl;
+#endif
+
+			assert( !m_assignment[Lit(cptr[0])^1] );
+
+			//assert( checkLearnedCLause( ptc, 0 ) );
+
+			if( dontimply )
+			  { 
+				impl.units.push_back(std::pair<unsigned int, unsigned int>( uip, m_decisionLevel ) ); 
+			  }
+			else
+			  { 
+				impl.units.push_back(std::pair<unsigned int, unsigned int>( uip, minbtlevel ) ); 
+				if( impl.backtracklevel > (int)minbtlevel )
+				  { impl.backtracklevel = minbtlevel; }
+			  }
+
+			impl.naryimpl[uip] = ptc;
+
+			// Update "m_incVarActivity".
+			m_incVarActivity *= m_varActMultiplier;
+
+			++newclauses;
+		  }
+	  }
+
+	e_learnedaigclause += newunits + newbins + newclauses;
+#ifdef EXPORTDEBUG
+	std::cout << "Learned " << newunits << " units, " << newbins << " bins and " << newclauses << " clauses from AIGsolve" << std::endl;
+#endif
+	return;
+  }
+#endif // #if 0
+
+  void Core::addSolution( const std::vector<int>& partsol )
+  {
+	e_aigsollevel = m_decisionLevel;
+
+	std::cout << "partsol: " << std::endl;
+	
+	for( unsigned int i = 0; i != partsol.size(); ++i )
+	  {
+		std::cout << partsol[i] << " ";
+	  }
+	std::cout << std::endl;
+
+	for(unsigned int i = 0; i != partsol.size(); ++i )
+	  {
+		unsigned int lit = partsol[i]+2;
+		if( partsol[i]<0 )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "set " << getLit(lit) << " as dc" << std::endl;
+#endif
+			if( isDC( lit ) )
+			  { 
+#ifdef EXPORTDEBUG
+				std::cout << "already dc" << std::endl; 
+#endif
+				continue; 
+			  }
+			setDC(lit);
+			addImplication( lit, NULL );
+			
+			if( deduce() != NULL )
+			  { assert(false); }
+		  }
+		else if(m_level[lit>>1] == 0 )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "set fixed value: " << getLit(lit) << std::endl;
+#endif
+			addDecision(lit);
+
+			if( deduce() != NULL )
+			  { assert(false); }
+		  }
+	  }
+  }
+	}
+
+#endif
+

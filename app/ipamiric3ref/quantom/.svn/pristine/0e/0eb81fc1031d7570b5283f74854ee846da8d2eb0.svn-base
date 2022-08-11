@@ -1,0 +1,205 @@
+
+/********************************************************************************************
+main.cpp -- Copyright (c) 2012, Tobias Schubert, Sven Reimer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, merge, 
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons 
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+********************************************************************************************/
+
+// Include standard headers.
+#include <algorithm>
+#include <iostream>
+#include <cstdlib>
+#include <cassert>
+#include <fstream>
+#include <string>
+#include <vector>
+
+// Include quantom related headers.
+#include "quantom.hpp"
+
+// An example demonstrating how to use the BMC-MAX mode in quantom
+int main (int argc, char** argv)
+{ 
+  std::cout << "c -------------------------------------------------------------------------------" << std::endl
+			<< "c (BMC-(max-))quantom, Tobias Schubert, Sven Reimer, University of Freiburg, 2013" << std::endl
+			<< "c -------------------------------------------------------------------------------" << std::endl;
+
+  quantom::Quantom myQuantom(1);
+
+  // Activate preprocessor
+  myQuantom.setPreprocessor(true);
+
+  // Activate some preprocessor methods
+  myQuantom.setUPLA(true);
+  myQuantom.setVarElim(true);
+  myQuantom.setSubsumption(true);
+
+  // Dummy example: a half adder with inputs "a", "b" and outputs "s", "c"
+  // Input "b" is connected to the flipflop "FF", input "a" is controllable (primary input)
+  // The carry-bit "c" is connected to the flipflop "FF", the sum bit "s" is a primary output 
+  // The requested property is: The sum output "s" is "1"
+  // We maximize over the flip-flop "FF", connected to "b" and "c"
+  // In this example we check the first two timeframes 
+  // In the first timeframe the property can not be satisfied
+  // In the second timeframe it can be satisfied with "a_0" = 0 and "a_1" = 1
+
+  // First set the bmc-mode in quantom 
+  myQuantom.setBMCMode(true);
+
+  // First define the variables and the corresponding levels:
+  // We put the variables in the 3rd level. Later on we're adding the first two levels
+  // Attention! Do NOT state the primary inputs here, they are stated in the following
+  myQuantom.setQVarLevel(2,3); // b
+  myQuantom.setQVarLevel(3,3); // s
+  myQuantom.setQVarLevel(4,3); // c
+
+  // You have to state the primary inputs explicitly ( "a" is primary input )
+  // This method also initilize "1" as a new variable for quantom solver core
+  myQuantom.setPrimaryInput( 1 ); // a
+
+  // We want to maximize the FF connected with "b" and "c"
+  // The methods introduce the existential/universal variables and the MUX
+  // Note: this method should be called AFTER ALL variables of the original problem are set
+  // Stores the new introduced select variable in ff.first and the the new existenital input in ff.second
+  std::pair< unsigned int, unsigned int > ff = myQuantom.setSoftVariable(2);
+
+  // Create transition relation:
+  std::vector< unsigned int > clause;
+
+  // The AND of the half adder. Inputs: 1,2; Output: 4
+  clause.push_back(2); clause.push_back(9);
+  myQuantom.addClauseTransition(clause); clause.clear();
+  clause.push_back(4); clause.push_back(9);
+  myQuantom.addClauseTransition(clause); clause.clear();
+  clause.push_back(3); clause.push_back(5); clause.push_back(8);
+  myQuantom.addClauseTransition(clause); clause.clear();
+
+  // The XOR of the half adder. Inputs: 1,2; Output: 3
+  clause.push_back(2); clause.push_back(4); clause.push_back(7);
+  myQuantom.addClauseTransition(clause); clause.clear();
+  clause.push_back(2); clause.push_back(5); clause.push_back(6);
+  myQuantom.addClauseTransition(clause); clause.clear();
+  clause.push_back(3); clause.push_back(4); clause.push_back(6);
+  myQuantom.addClauseTransition(clause); clause.clear();
+  clause.push_back(3); clause.push_back(5); clause.push_back(7);
+  myQuantom.addClauseTransition(clause); clause.clear();
+
+  // The property ("s" should be 1):
+  clause.push_back(6);
+  myQuantom.addClauseProperty(clause);
+
+  // Now state the flipflop, and how it is connected:
+  // Define variable "2" (b) as flipflop and variable "4" (c) as the corresponding flipflop in the next timeframe
+  myQuantom.setFF(2,4);
+
+  unsigned int result(0);
+
+  // Note: as in "standard maximization" you can demand a certain optimum value by setting "opt" to a value >= 0 
+  int opt(-1);
+
+  // Maximize with just one level and unsat-based mode ("0")
+  result = myQuantom.MaximizeBMC(opt,0);
+
+  // Collecting variables indices of primary inputs
+  // Result is split by transition level - starting with 1 (0 is alsways empty)
+  // The corresponded primary inputs are always at the same position in the vector, i.e.,
+  // The first declared primary input on transition level 1 is in pis[1][0],
+  // The shifted index of pis[1][0] is in pis[2][0], and so on...
+  std::vector< std::vector< unsigned int > > pis( myQuantom.getAllPrimaryInputs() );
+
+  std::cout << "result with one transition level: " << std::endl;
+  if( result == QUANTOM_SAT )
+	{
+	  std::cout << "s SATISFIABLE" << std::endl;
+	  
+	  // Get the satisfying variable assignment.
+	  std::vector< unsigned int > satmodel = myQuantom.model();
+	  std::cout << "v ";
+	  // Satisfiying assigment of select- and existvariable of soft the variable
+	  std::cout << (((satmodel[ff.first]&1) != 0)?"-":"") << (satmodel[ff.first]>>1) << " ";
+	  std::cout << (((satmodel[ff.second]&1) != 0)?"-":"") << (satmodel[ff.second]>>1) << " ";
+	  // Satisfying assignment of primary inputs
+	  for( unsigned int i = 1; i < pis.size(); ++i )
+		{
+		  for( unsigned int j = 0; j != pis[i].size(); ++j )
+			{
+			  std::cout << (((satmodel[pis[i][j]]&1) != 0)?"-":"") << (satmodel[pis[i][j]]>>1) << " ";
+			}
+		}
+	  std::cout << std::endl;
+	  // Print optimum
+	  std::cout << "o " << opt << std::endl;
+	}
+  else if ( result == QUANTOM_UNSAT )
+	{ std::cout << "s UNSATISFIABLE" << std::endl; }
+  else
+	{ std::cout << "s UNKNOWN" << std::endl; }
+
+  // Create the next transition level
+  myQuantom.createNextTransition();
+
+  // Creates and adds new "learned" clauses from last incremental steps
+  // Returns the clauses which could be shifted
+  // Note, the clauses are already added, but "learnedclauses" could be used for other quantom objects
+  // Note: in this minimal example "learnedclauses" is empty
+  std::vector< std::vector< unsigned int > > learnedclauses = myQuantom.shiftLearnedClauses();
+
+  // Perform inprocessing
+  // Note, inprocessing should be called AFTER "createNextTransition()" and "shiftLearnedClauses()"
+  result = myQuantom.inprocess();
+
+  // Reset opt
+  opt = -1;
+
+  // Maximize with two levels and unsat-based mode ("0")  
+  if( result == 0 )
+	{ result = myQuantom.MaximizeBMC(opt,0); }
+
+  // Get again the primary inputs
+  pis = myQuantom.getAllPrimaryInputs();
+
+  std::cout << "result with two transition levels: " << std::endl;
+
+  if( result == QUANTOM_SAT )
+	{
+	  std::cout << "s SATISFIABLE" << std::endl;
+
+	  // Get the satisfying variable assignment.
+	  std::vector< unsigned int > satmodel = myQuantom.model();
+	  std::cout << "v ";
+	  // Satisfiying assigment of select- and existvariable of soft the variable
+	  std::cout << (((satmodel[ff.first]&1) != 0)?"-":"") << (satmodel[ff.first]>>1) << " ";
+	  std::cout << (((satmodel[ff.second]&1) != 0)?"-":"") << (satmodel[ff.second]>>1) << " ";
+	  // Satisfying assignment of primary inputs
+	  for( unsigned int i = 1; i < pis.size(); ++i )
+		{
+		  for( unsigned int j = 0; j != pis[i].size(); ++j )
+			{
+			  std::cout << (((satmodel[pis[i][j]]&1) != 0)?"-":"") << (satmodel[pis[i][j]]>>1) << " ";
+			}
+		}
+	  std::cout << std::endl;
+
+	  // Print optimum
+	  std::cout << "o " << opt << std::endl;
+	}
+  else if ( result == QUANTOM_UNSAT )
+	{ std::cout << "s UNSATISFIABLE" << std::endl; }
+  else
+	{ std::cout << "s UNKNOWN" << std::endl; }
+
+  return result;
+}

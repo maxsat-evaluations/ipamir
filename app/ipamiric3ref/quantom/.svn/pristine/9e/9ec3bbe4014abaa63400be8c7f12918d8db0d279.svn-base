@@ -1,0 +1,1046 @@
+
+/********************************************************************************************
+main.cpp -- Copyright (c) 2012, Tobias Schubert, Sven Reimer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, merge, 
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons 
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+********************************************************************************************/
+
+// Include standard headers.
+#include <sys/resource.h>
+#include <algorithm>
+#include <iostream>
+#include <cstdlib>
+#include <cassert>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <sstream>
+
+// Include quantom related headers.
+#include "quantom.hpp"
+
+// Returns the CNF file statistics given by the "p cnf #vars #clauses"-line.
+std::pair<unsigned int, unsigned int> loadStats (const std::string& file)
+{      
+  // Initialization.
+  std::pair<unsigned int, unsigned int> stats(0,0);
+
+  // Open the file.
+  std::ifstream source;
+  source.open(file.c_str());
+
+  // Any problems while opening the file?
+  if (!source) 
+    { return stats; } 
+
+  // Variables.
+  unsigned int vars(0);
+  unsigned int clauses(0); 
+  char c; 
+
+  // Process the CNF file.
+  while (source.good())
+    {
+      // Get the next character.
+      c = source.get();
+   
+      // No more clauses?
+      if (!source.good())
+		{ break; }
+   
+      // Clause? 
+      if (c == 'p')
+		{
+		  // Pass the "p cnf "-part.
+		  for (unsigned int w = 0; w < 6; ++w)
+			{ c = source.get(); }
+		  while (c == ' ' ) 
+			{ c = source.get(); }
+
+		  // Get the number of variables.
+		  while (c != ' ' && c != '\n') 
+			{ vars = (vars * 10) + (unsigned int) c - '0'; c = source.get(); }
+	  
+		  // Remove whitespaces.
+		  while (c == ' ' ) 
+			{ c = source.get(); }
+	  
+		  // Get the number of clauses.
+		  while (c != ' ' && c != '\n') 
+			{ clauses = (clauses * 10) + (unsigned int) c - '0'; c = source.get(); }
+
+		  // Update "stats" and return.
+		  stats.first  = vars;
+		  stats.second = clauses;
+		  return stats;
+		}
+      
+      // Go to the next line of the file. 
+      while (c != '\n') 
+		{ c = source.get(); } 	  
+    }
+  
+  // Close the file.
+  source.close();
+  
+  // Return "stats".
+  return stats;
+}
+
+// Loads a QBF formula from a file. The return values are as follows:
+// 0 -- Everything went fine.
+// 1 -- QBF formula unsatisfiable.
+// 2 -- Unable to open file.
+// 3 -- QdimacsError
+// type = 0: QBF, type >= 1 MAXQBF
+unsigned int loadQBF ( const std::string& file, unsigned int& maxIndexOrg, quantom::Quantom& solver, unsigned int type, std::vector< unsigned int >& assumptions, unsigned int liftingmode )
+{      
+
+  // Open the file.
+  std::ifstream source;
+  source.open(file.c_str());
+
+  // Any problems while opening the file?
+  if (!source) 
+    { return 2; } 
+     
+  // Variables.
+  std::vector<unsigned int> clause;
+  unsigned int literal(0);
+  unsigned int sign(0);
+  unsigned int curQlevel(1);
+  unsigned int vars(0);
+  unsigned int threshold(0); 
+  unsigned int maxsoftlevel(0);
+  //last level was existential?
+  bool elevel( true );
+  char c('0');
+  bool firstlit( true );
+  unsigned int softvariables(0);
+
+  // Process the QBF file.
+  while (source.good())
+    {
+      // Get the next character.
+      c = source.get();
+
+      // No more clauses?
+      if (!source.good())
+		{ break; }
+
+      // prefix?
+      while( c == 'a' || c =='e' )
+		{
+		  if( (c == 'a') == elevel )
+			{
+			  ++curQlevel;
+			  elevel ^= 1;
+			}
+		  c = source.get();
+
+		  do {
+			literal = 0;
+
+			while (c == ' ') 
+			  { c = source.get();}
+
+			// Let's get the next literal.
+			while (c != ' ' && c != '\n') 
+			  {
+				literal = (literal * 10) + (unsigned int) c - '0';
+				c = source.get();
+			  }
+
+			// set "qlevel" of "literal"
+			if (literal != 0) 
+			  { 
+				if(!solver.setQVarLevel(literal, curQlevel)) { std::cout << "ERROR with " << literal << std::endl; return 3;} 
+			  }
+			
+		  } while (literal != 0);
+
+		  c = source.get();
+		}
+
+	  maxsoftlevel = curQlevel;
+	  if( (maxsoftlevel%2) == 0 )
+		{ ++maxsoftlevel; }
+
+      if (c == 'p')
+		{
+		  // Get the next char. 
+		  c = source.get(); 
+
+		  // Remove whitespaces.
+		  while (c == ' ') 
+			{ c = source.get(); }
+
+		  // In case of a MaxQBF benchmark file, the next character has to be "w".
+		  if (type == 1 || type == 2 )
+			{ assert(c = 'w'); c = source.get(); }
+	  
+		  // The next three characters have to be "c", "n", and "f".
+		  assert(c = 'c');
+		  c = source.get();
+		  assert(c = 'n');
+		  c = source.get(); 
+		  assert(c = 'f');
+		  c = source.get(); 
+
+		  // Remove whitespaces.
+		  while (c == ' ') 
+			{ c = source.get(); }
+		  
+		  // Get the number of variables.
+		  while (c != ' ' && c != '\n') 
+			{ vars = (vars * 10) + (unsigned int) c - '0'; c = source.get(); }
+
+		  // Update "maxIndexOrg".
+		  maxIndexOrg = vars; 
+
+		}
+	  // Soft variable?
+	  else if ( c == 's' )
+		{
+		  assert( type == 4 || type == 5 );
+
+		  ++softvariables;
+
+		  std::vector< unsigned int > levels;
+		  std::vector< unsigned int > weights;
+
+		  unsigned int readmode = 0;
+
+		  c = source.get();
+
+		  while( true )
+			{
+			  unsigned int value(0);
+
+			  bool sign(true);
+
+			  // Remove whitespaces.
+			  while ( c == ' ' || c == '[' || c == ',' || c == ';' ) 
+				{ c = source.get(); }
+
+			  // End of list
+			  if( c == ']' )
+				{ 
+				  readmode = 2;
+				  c = source.get();
+				  
+				  while ( c == ' ' || c == '-') 
+					{ 
+					  if( c == '-' )
+						{ sign = false; }
+					  
+					  c = source.get(); 
+					}
+				}
+
+			  // Let's get the level/weight.
+			  while ( c != ',' && c != ';' && c != ']' && c != ' ')
+				{
+				  value = (value * 10) + (unsigned int) c - '0'; 
+				  c = source.get();
+				}
+
+			  multiplexervars result;
+			  switch(readmode)
+				{
+				case 0:
+				  levels.push_back(value);
+				  if( value > maxsoftlevel )
+					{ 
+					  maxsoftlevel = value; 
+					  if( (maxsoftlevel%2) == 0 )
+						{ ++maxsoftlevel; }
+					}
+				  break;
+				case 1:
+				  weights.push_back(value);
+				  break;
+				case 2:
+				  // read variable
+				  for( unsigned int i = maxIndexOrg+1 ; i <= value; ++i )
+					{
+						  // set "qlevel" of "literal"
+					  if(!solver.setQVarLevel(i, maxsoftlevel)) { std::cout << "ERROR with " << i << std::endl; return 3;} 
+					}
+				  maxIndexOrg = value;
+					  
+				  // Soft variables
+				  if( type == 4 )
+					{ result = solver.setSoftVariable ( value, levels, weights ); }
+				  // Lifting
+				  else if ( type == 5 ) 
+					{ 
+					  unsigned int lit = value<<1;
+					  if( !sign ) 
+						{ lit += 1; }
+					  assumptions.push_back( lit );
+					}
+				  break;
+				default:
+				  assert(false);
+				}
+
+			  if( readmode == 2 )
+				{ break; }
+
+			  if ( c == ',' )
+				{ readmode = 1; }
+			  else if ( c == ';' )
+				{ readmode = 0; }
+			}
+		}
+	  // Target trigger 
+	  else if( c == '*' )
+		{
+		  // Reset "clause".
+		  clause.clear();
+
+		  // Remove whitespaces.
+		  while (c != '\n') 
+			{ c = source.get(); }
+
+		  if ( type == 5 )
+			{
+			  c = source.get();
+			  while( true )
+				{
+				  literal = 0;
+				  sign = 1;
+
+				  // Remove whitespaces.
+				  while (c == ' ') 
+					{ c = source.get(); }
+
+				  // Have we reached the clause stopper?
+				  if (c == '0')
+					{
+					  assert( clause.size() == 1 );
+					  // Add "clause" to the clause database of "solver".	  
+					  if ( !solver.addClause(clause) )
+						{ 
+						  std::cout << "c found (implied) empty clause in original instance" << std::endl; 
+						  for( unsigned int i = 0; i != clause.size(); ++i )
+							{
+							  std::cout << clause[i] << " ";
+							}
+						  std::cout << std::endl;
+						  source.close(); return 1; 
+						}		      
+					  break; 
+					}
+
+				  // Let's get the next literal.
+				  while (c != ' ') 
+					{
+					  if (c == '-')
+						{ sign = 0; }
+					  else
+						{ literal = (literal * 10) + (unsigned int) c - '0'; }
+					  c = source.get();
+					}
+
+				  // For liftingmode 4 we need the non-negated property!
+				  if( liftingmode == 4 )
+					{ sign ^= 1; }
+
+				  // Add "literal" to "clause".		      
+				  clause.push_back((literal << 1) + sign); 
+				  
+				  // Update "maxVars" if necessary.
+				  if (literal > maxIndexOrg)
+					{ maxIndexOrg = literal; }
+
+				  // Consistency check.
+				  assert(literal != 0); 
+				}
+			}
+		}
+      // Clause? 
+	  else if ( (c != 'c' && c != 'p') )
+		{
+		  // Reset "clause".
+		  clause.clear();
+
+		  firstlit = true;
+
+	      // Initialize "threshold".
+	      threshold = 0; 
+	      
+		  // Get the next clause.
+		  while( true )
+			{
+			  // Initialization.
+			  literal = 0;
+			  sign = 0;
+
+			  // Remove whitespaces.
+			  while (c == ' ') 
+				{ c = source.get(); }
+
+			  // Have we reached the clause stopper?
+			  if (c == '0')
+				{
+				  // Mark all variables occuring in a softclause in (partial) MAX-SAT as "Don't Touch"
+				  if( (threshold == 1) && ( clause.size() == 0 || !solver.addSoftClause(clause) ) )
+					{
+					  std::cout << "c found (implied) empty clause in original instance" << std::endl;
+					  for( unsigned int i = 0; i != clause.size(); ++i )
+						{
+						  std::cout << clause[i] << " ";
+						}
+					  std::cout << std::endl;
+					  source.close(); return 1; 
+					}
+				  // Add "clause" to the clause database of "solver".	  
+				  else if (clause.size() <= threshold || !solver.addClause(clause) )
+					{ 
+					  std::cout << "c found (implied) empty clause in original instance" << std::endl;
+
+ 					  for( unsigned int i = 0; i != clause.size(); ++i )
+						{
+						  std::cout << clause[i] << " ";
+						}
+					  std::cout << std::endl;
+
+					  if( ( type == 4 ) || ( type == 5 ) )
+						{ std::cout << "c soft variables: " << softvariables << std::endl; }
+					  source.close(); return 1; 
+					}		      
+
+				  break; 
+				}
+
+			  // Let's get the next literal.
+			  while (c != ' ') 
+				{
+				  if (c == '-')
+					{ sign = 1; }
+				  else
+					{ literal = (literal * 10) + (unsigned int) c - '0'; }
+				  c = source.get();
+				}
+
+			  // Consistency check.
+			  assert(literal != 0); 
+
+			  if ( (type == 1 || type == 2 ) && firstlit)
+				{
+				  // Reset "firstLit".
+				  firstlit = false;
+				  
+				  // Consistency check.
+				  assert(sign == 0);
+
+				  // Soft clause?
+				  if (literal == 1)
+					{
+					  // Update "threshold".
+					  threshold = 1; 
+					}
+				}
+			  // Add "literal" to "clause".
+			  else
+				{
+				  // Add "literal" to "clause".		      
+				  clause.push_back((literal << 1) + sign);
+
+				  // Update "maxVars" if necessary.
+				  if (literal > maxIndexOrg)
+					{ maxIndexOrg = literal; }
+				}
+			}
+		}
+
+      if( source.eof() ) { break; }
+      // Go to the next line of the file. 
+      while (c != '\n') 
+		{ c = source.get(); }
+    }
+
+  // Close the file.
+  source.close();
+
+  // Everything went fine.
+  return 0;
+}
+
+void printUsage( void )
+{
+  std::cout << "c Usage: ./quantom [Options] <cnf file>" << std::endl
+			<< "c ======" << std::endl
+			<< "c " << std::endl
+			<< "c Options:" << std::endl
+			<< "c ========" << std::endl
+			<< "c" << std::endl
+			<< "c" << std::endl
+			<< "c general options: " << std::endl
+			<< "c" << std::endl
+			<< "c   --cpuLimit=[>=0.0]          --> CPU limit in seconds" << std::endl
+			<< "c                                   0.0: no CPU limit (default)" << std::endl
+			<< "c   --prepro=[false,true]       --> 'Preprocessor?' (default: true)" << std::endl
+			<< "c   --inpro=[false,true]        --> 'Inprocessor?' (default: false)" << std::endl
+			<< "c   --solve=[false,true]        --> 'Solve instance?' (default: true)" << std::endl
+			<< "c   --solvemode=[0,5]           --> 'solve mode'" << std::endl
+			<< "c                                   0: QBF (default)" << std::endl
+			<< "c                                   1: MAXQBF" << std::endl
+			<< "c                                   2: MAXQBF (incremental mode)" << std::endl
+			<< "c                                   4: QBF with soft variables" << std::endl
+			<< "c                                   5: Lifting" << std::endl
+			<< "c" << std::endl
+			<< "c Solver core options: " << std::endl
+			<< "c   --decHeu=[0,3]              --> 'Decision Heuristic'" << std::endl
+			<< "c                                   0: VSIDS" << std::endl
+			<< "c                                   1: DLCS" << std::endl
+			<< "c                                   2: DLCS+Implication" << std::endl
+			<< "c                                   3: QuBE-Style (default)" << std::endl
+			<< "c   --restartHeu=[0,4]          --> 'Restart Heuristic'" << std::endl
+			<< "c                                   0: no restarts" << std::endl
+			<< "c                                   1: luby (default)" << std::endl
+			<< "c                                   2: picosat" << std::endl
+			<< "c                                   3: glucose" << std::endl
+			<< "c   --lubyShift=[>=0]           --> 'Luby Shift' (default: 12)" << std::endl
+			<< "c   --innerPico=[>=0]           --> 'Set innerloop for picosat restart' (default: 1024)" << std::endl
+			<< "c   --outerPico=[>=0]           --> 'Set outerloop for picosat restart' (default: 32)" << std::endl
+			<< "c   --ip=[0,3]                  --> 'Initial Phase'" << std::endl
+			<< "c                                   0: occur based"  << std::endl
+			<< "c                                   1: '0'+all flipped" << std::endl
+			<< "c                                   2: '0'+universal flipped (default)" << std::endl
+			<< "c                                   3: random " << std::endl
+			<< "c   --sVS=[false,true]          --> 'switch Variable Sign' (default: true)" << std::endl
+			<< "c   --cacheSwap=[false,true]    --> 'Swap Cache while backtracking' (default: false)" << std::endl
+			<< "c   --lhbr=[false,true]         --> 'Use LHBR' (default: false)" << std::endl
+			<< "c" << std::endl
+			<< "c Preprocessor options: " << std::endl
+			<< "c   --subsum=[false,true]       --> 'Perform Subsumption checks' (default: true)" << std::endl
+			<< "c   --upla=[false,true]         --> 'Perform Unit Propagation Lookahead' (default: true)" << std::endl
+			<< "c   --varElim=[false,true]      --> 'Perform variable elimination' (default: true)" << std::endl
+	//<< "c   --quantMerge=[false,true]   --> 'Perform quantifier merge' (default: false)" << std::endl
+			<< "c" << std::endl
+			<< "c Other options: " << std::endl
+			<< "c   --maxmode=[0,2]             --> 'Maximimizer mode'" << std::endl
+			<< "c                                   0: unsat based" << std::endl
+			<< "c                                   1: sat based (default)" << std::endl
+			<< "c                                   2: binary search" << std::endl
+			<< "c   --incmode=[false,true]      --> 'Partial/incremental MaxQBF?' (default: false)" << std::endl
+			<< "c   --skipbychance=[false,true] --> 'Skip initial by chance solve in maxQBF satbased?' (default: false)" << std::endl
+			<< "c   --maxInpro=[false,true]     --> 'Inprocessing during maxQBF?' (default: false)" << std::endl
+			<< "c   --liftmode= [1,3]           --> 'Lifting mode'" << std::endl
+			<< "c                                   1: conflict driven" << std::endl
+			<< "c                                   2: assumption driven" << std::endl
+			<< "c                                   3: 1+2 combined (default)" << std::endl
+			<< "c   --v | --verbose             --> 'Increase verbosity' (default: 0)" << std::endl
+			<< "c   --resetVerbose              --> 'Reset verbosity'" << std::endl
+			<< "c" << std::endl
+			<< "s UNKNOWN" << std::endl;
+}
+
+// An example demonstrating how to use quantom.
+int main (int argc, char** argv)
+{ 
+  // Initialization.
+  std::cout.precision(3);
+  std::cout.setf(std::ios::unitbuf);
+  std::cout.setf(std::ios::fixed);
+  
+  // Output.
+  std::cout << "c ------------------------------------------------------------------------" << std::endl
+			<< "c quantom, Sven Reimer, Tobias Schubert, University of Freiburg, 2011-2016" << std::endl
+			<< "c ------------------------------------------------------------------------" << std::endl;
+
+  // No command line parameters?
+  if (argc == 1)
+    {
+      // Ouput.
+	  printUsage();
+ 	
+      // Terminate with exit code 0 (UNKNOWN).
+      exit(0);
+    }
+
+  // Get the CNF file statistics given by the "p cnf #vars #clauses"-line.
+  std::pair<unsigned int, unsigned int> stats(loadStats(argv[argc-1]));
+
+  // Any problems while loading the file?
+  if (stats.first == 0 && stats.second == 0)
+    {
+      // Output. 
+      std::cout << "c Unable to open CNF file" << std::endl
+				<< "s UNKNOWN" << std::endl; 
+      printUsage();
+      // Terminate with exit code 0 (UNKNOWN).
+      return 0; 
+    }
+
+  // Initialization.
+  unsigned int variables(stats.first);
+  unsigned int clauses(stats.second); 
+  unsigned int load(0);
+
+  unsigned int lubyShift(12);
+  unsigned int innerPico(1024);
+  unsigned int outerPico(32);
+  unsigned int ip(2); 
+  unsigned int decHeu(3);
+  unsigned int restartHeu(1);
+  unsigned int solvemode(0);
+  unsigned int bmcdepth(5);
+  unsigned int maxmode(1);
+  unsigned int verbose(0);
+  bool cacheSwap(true);
+  bool lhbr(false);
+  bool sVS(true);
+  bool subsumption(true);
+  bool upla(true);
+  bool prepro(true);
+  bool inpro(false);
+  bool maxinpro(false);
+  bool resolution(true);
+  bool quantmerge(false);
+  bool solve(true);
+  bool skipbychance(false);
+  double cpuLimit(0.0);
+
+  unsigned int grid(2);
+  unsigned int horizontalwidth(4);
+  unsigned int split(8);
+  unsigned int maxwidth(0);
+  bool csc(false);
+  bool trigger(false);
+
+  bool incmode(false);
+
+  unsigned int liftingmode(3);
+  unsigned int liftingsort(26);
+
+  std::vector< unsigned int > assumptions;
+  
+  // Get the additional command line parameters one by one.
+  for (unsigned int i = 1; i < ((unsigned int)argc-1); ++i)
+    {
+      std::string argument(argv[i]); 
+      bool matched(false);      
+
+      if (argument == "--ip=0")
+		{ ip = 0; matched = true; }
+      else if (argument == "--ip=1")
+		{ ip = 1; matched = true; }
+	  else if (argument == "--ip=2")
+		{ ip = 2; matched = true; }
+	  else if (argument == "--ip=3")
+		{ ip = 3; matched = true; }
+      else if (argument == "--prepro=false")
+		{ prepro = false; matched = true; }
+      else if (argument == "--prepro=true")
+		{ prepro = true; matched = true; }
+      else if (argument == "--inpro=false")
+		{ inpro = false; matched = true; }
+      else if (argument == "--inpro=true")
+		{ inpro = true; matched = true; }
+      else if (argument == "--varElim=false")
+		{ resolution = false; matched = true; }
+      else if (argument == "--varElim=true")
+		{ resolution = true; matched = true; }
+      else if (argument == "--quantMerge=false")
+		{ quantmerge = false; matched = true; }
+      else if (argument == "--quantMerge=true")
+		{ quantmerge = true; matched = true; }
+      else if (argument == "--solve=false")
+		{ solve = false; matched = true; }
+      else if (argument == "--solve=true")
+		{ solve = true; matched = true; }
+	  else if (argument == "--decHeu=0")
+		{ decHeu = 0; matched = true; }
+	  else if (argument == "--decHeu=1")
+		{ decHeu = 1; matched = true; }
+	  else if (argument == "--decHeu=2")
+		{ decHeu = 2; matched = true; }
+	  else if (argument == "--decHeu=3")
+		{ decHeu = 3; matched = true; }
+	  else if (argument == "--restartHeu=0")
+		{ restartHeu = 0; matched = true; }
+	  else if (argument == "--restartHeu=1")
+		{ restartHeu = 1; matched = true; }
+	  else if (argument == "--restartHeu=2")
+		{ restartHeu = 2; matched = true; }
+	  else if (argument == "--restartHeu=3")
+		{ restartHeu = 3; matched = true; }
+	  else if (argument == "--restartHeu=4")
+		{ restartHeu = 4; matched = true; }
+	  else if (argument == "--cacheSwap=false")
+		{ cacheSwap = false; matched = true; }
+	  else if (argument == "-cacheSwap=true")
+		{ cacheSwap = true; matched = true; }
+	  else if (argument == "--sVS=false")
+		{ sVS = false; matched = true; }
+	  else if (argument == "--sVS=true")
+		{ sVS = true; matched = true; }
+	  else if (argument == "--lhbr=false")
+		{ lhbr = false; matched = true; }
+	  else if (argument == "--lhbr=true")
+		{ lhbr = true; matched = true; }
+	  else if (argument == "--subsum=false")
+		{ subsumption = false; matched = true; }
+	  else if (argument == "--subsum=true")
+		{ subsumption = true; matched = true; }
+	  else if (argument == "--upla=false")
+		{ upla = false; matched = true; }
+	  else if (argument == "--upla=true")
+		{ upla = true; matched = true; }
+	  else if (argument == "--solvemode=0")
+		{ solvemode = 0; matched = true; }
+	  else if (argument == "--solvemode=1")
+		{ solvemode = 1; matched = true; }
+	  else if (argument == "--solvemode=2")
+		{ solvemode = 2; incmode= true; matched = true; }
+	  else if (argument == "--solvemode=4")
+		{ solvemode = 4; matched = true; }
+	  else if (argument == "--solvemode=5")
+		{ solvemode = 5; matched = true; }
+	  else if (argument == "--gridMode=0")
+		{ grid = 0; matched = true; }
+	  else if (argument == "--gridMode=1")
+		{ grid = 1; matched = true; }
+	  else if (argument == "--gridMode=2")
+		{ grid = 2; matched = true; }
+	  else if (argument == "--gridMode=3")
+		{ grid = 3; matched = true; }
+	  else if (argument == "--maxmode=0")
+		{ maxmode = 0; matched = true; }
+	  else if (argument == "--maxmode=1")
+		{ maxmode = 1; matched = true; }
+	  else if (argument == "--maxmode=2")
+		{ maxmode = 2; matched = true; }
+	  else if (argument == "--incmode=true")
+		{ incmode = true; matched = true; }
+	  else if (argument == "--incmode=false")
+		{ incmode = false; matched = true; }
+      else if (argument == "--csc=false")
+		{ csc = false; matched = true; }
+      else if (argument == "--csc=true")
+		{ csc = true; matched = true; }
+      else if (argument == "--trigger=false")
+		{ trigger = false; matched = true; }
+      else if (argument == "--trigger=true")
+		{ trigger = true; matched = true; }
+      else if (argument == "--maxInpro=false")
+		{ maxinpro = false; matched = true; }
+      else if (argument == "--maxInpro=true")
+		{ maxinpro = true; matched = true; }
+      else if (argument == "--skipbychance=false")
+		{ skipbychance = false; matched = true; }
+      else if (argument == "--skipbychance=true")
+		{ skipbychance = true; matched = true; }
+	  else if (argument == "--v" || argument == "--verbose" )
+		{ ++verbose; matched = true; }
+	  else if (argument == "--resetVerbose" )
+		{ verbose = 0; matched = true; }
+	  else if (argument == "--liftmode=1")
+		{ liftingmode = 1; matched = true; }
+	  else if (argument == "--liftmode=2")
+		{ liftingmode = 2; matched = true; }
+	  else if (argument == "--liftmode=3")
+		{ liftingmode = 3; matched = true; }
+	  else if (argument.compare(0,11,"--cpuLimit=") == 0)
+		{ std::stringstream sCPU(argument.substr(11,argument.length())); sCPU >> cpuLimit; matched = true; }
+	  else if (argument.compare(0,12,"--lubyShift=") == 0)
+		{ std::stringstream sLuby(argument.substr(12,argument.length())); sLuby >> lubyShift; matched = true; }
+	  else if (argument.compare(0,12,"--innerPico=") == 0)
+		{ std::stringstream sInner(argument.substr(12,argument.length())); sInner >> innerPico; matched = true; }
+	  else if (argument.compare(0,12,"--outerPico=") == 0)
+		{ std::stringstream sOuter(argument.substr(12,argument.length())); sOuter >> outerPico; matched = true; }
+	  else if (argument.compare(0,11,"--bmcdepth=") == 0)
+		{ std::stringstream sDepth(argument.substr(11,argument.length())); sDepth >> bmcdepth; matched = true; }
+	  else if (argument.compare(0,16,"--horizontwidth=") == 0)
+		{ std::stringstream sHori(argument.substr(16,argument.length())); sHori >> horizontalwidth; matched = true; }
+	  else if (argument.compare(0,8,"--split=") == 0)
+		{ std::stringstream sSplit(argument.substr(8,argument.length())); sSplit >> split; matched = true; }
+	  else if (argument.compare(0,11,"--maxWidth=") == 0)
+		{ std::stringstream sMaxwidth(argument.substr(11,argument.length())); sMaxwidth >> maxwidth; matched = true; }
+      
+      // Unknown option?
+      if (!matched)
+		{
+		  // Output. 
+		  std::cout << "c Unknown option: " << argv[i] << std::endl
+					<< "s UNKNOWN" << std::endl; 
+
+		  printUsage();
+		  // Terminate with exit code 0 (UNKNOWN).
+		  return 0;
+		}
+    }
+
+  quantom::Quantom myQuantom;
+
+  // Set the maximum variable index.
+  myQuantom.setMaxIndex(variables); 
+
+  // Set the CPU time limit to "cpuLimit". 
+  myQuantom.setCPULimit(cpuLimit); 
+
+  // Set the Luby shift to "lubyShift".
+  myQuantom.setLubyShift(lubyShift); 
+
+  // Set the "Pico loops" mode to "inner" and "outer".
+  myQuantom.setPicoLoops(innerPico, outerPico); 
+
+  // Set the "Initial Phase" mode to "ip".
+  myQuantom.setIP(ip); 
+
+  // Set the "Switch Var Sign" mode to "sVS".
+  myQuantom.setSwitchVarSign(sVS); 
+
+  // Set the "Decision Heuristic" to "decHeu".
+  myQuantom.setDecHeu(decHeu); 
+  
+  // Set the "Restart Heuristic" to "restartHeu".
+  myQuantom.setRestartHeu(restartHeu); 
+
+  // Set the "Cache Swap" to "cacheSwap".
+  myQuantom.setCacheSwap(cacheSwap); 
+
+  // Set "Lazy Hyper Binary Resolution" to "lhbr".
+  myQuantom.setLHBR(lhbr); 
+
+  // Set "Subsumption" mode to "subsumption".
+  myQuantom.setSubsumption(subsumption); 
+
+  // Set "UPLA" mode to "upla".
+  myQuantom.setUPLA(upla); 
+
+  // Set "preprocessor" mode to "prepro".
+  myQuantom.setPreprocessor(prepro); 
+
+  // Set "inprocessor" mode to "inpro".
+  myQuantom.setInprocessor(inpro); 
+
+  // Set "variable elimination" to "resolution".
+  myQuantom.setVarElim(resolution); 
+
+  // Set "quantifier merge" to "merge quant".
+  myQuantom.setQuantMerge(quantmerge); 
+
+  // Set "solve" mode to "solve".
+  myQuantom.setSolve(solve); 
+
+  myQuantom.setMaxMode(maxmode); 
+
+  myQuantom.setMaxInpro(maxinpro);
+  myQuantom.skipInitbyChance(skipbychance);
+
+  myQuantom.setVerbosity(verbose); 
+
+  myQuantom.setGridMode(grid);
+  myQuantom.setHorizontalWidth(horizontalwidth);
+  myQuantom.setCSC(csc);
+  myQuantom.setTrigger(trigger);
+  myQuantom.setSplittedWidth(split);
+  myQuantom.setMaxWidth(maxwidth);
+
+
+    // Initialization.
+  unsigned int maxIndexOrg(0); 
+
+  // Load the CNF file specified by the user.
+  if ((load = loadQBF( argv[argc-1], maxIndexOrg, myQuantom, solvemode, assumptions, liftingmode )) > 0)
+    {
+      // Output.
+      switch (load)
+		{
+		case 1: std::cout << "s UNSATISFIABLE" << std::endl; break;
+		case 2: std::cout << "c Unable to open CNF file" << std::endl << "s UNKNOWN" << std::endl;  break;
+		case 3: std::cout << "c something wrong with qdimacsfile" << std::endl << "s UNKNOWN" << std::endl; break;
+		}
+      
+	  // Continue in lifting mode...
+	  if ( solvemode != 5 )
+		{
+		  // Terminate with exit code 0 (UNKNOWN).
+		  return 0;
+		}
+    }
+
+  // Time measurement.
+  struct rusage resourcesL;
+  double timeL(0.0);
+  getrusage(RUSAGE_SELF, &resourcesL); 
+  timeL += (double) resourcesL.ru_utime.tv_sec + 1.e-6 * (double) resourcesL.ru_utime.tv_usec;
+  
+  // Output.
+  std::cout << "c max varindex...........: " << variables                     << std::endl
+			<< "c #clauses...............: " << clauses                       << std::endl
+			<< "c cpu limit..............: " << cpuLimit << "s"               << std::endl
+			<< "c decision heuristic.....: " << decHeu                        << std::endl
+			<< "c restart heuristic......: " << restartHeu                    << std::endl;
+  if( restartHeu == 1 )
+	{ std::cout << "c luby shift.............: " << lubyShift                 << std::endl; }
+  else if ( restartHeu == 2 )
+	{ std::cout << "c pico loops (i/o).......: " << innerPico << "/" << outerPico << std::endl; }
+  std::cout	<< "c initial phase..........: " << ip                            << std::endl
+			<< "c swap cache.............: " << cacheSwap                     << std::endl
+			<< "c switch Var sign .......: " << sVS                           << std::endl
+			<< "c lhbr...................: " << lhbr                          << std::endl
+			<< "c subsumption........... : " << subsumption                   << std::endl 
+			<< "c preprocessor.......... : " << prepro                        << std::endl 
+			<< "c variable elimination.. : " << resolution                    << std::endl 
+			<< "c upla.................. : " << upla                          << std::endl 
+			<< "c solve................. : " << solve                         << std::endl 
+			<< "c maxmode............... : " << maxmode                       << std::endl 
+			<< "c solvemode............. : ";
+
+  switch( solvemode ) 
+	{
+	case 0:
+	  std::cout << "QBF";
+	  break;
+	case 1:
+	  std::cout << "MaxQBF";
+	  break;
+	case 2:
+	  std::cout << "MaxQBF (incremental)";
+	  break;
+	case 4:
+	  std::cout << "QBF with soft variables";
+	  if( incmode )
+		{ std::cout << " (incremental)"; }
+	  break;
+	case 5:
+	  std::cout << "Lifting";
+	  break;
+	default:
+	  std::cout << "Unknown mode";
+	  return QUANTOM_UNKNOWN;
+	}
+  std::cout << std::endl << "c cpu time (loading CNF).: " << timeL << "s"                  << std::endl
+			<< "c ==========================================================" << std::endl;
+
+
+  unsigned int result(0);
+  int opt(-1);
+
+  std::vector< unsigned int > liftedvars;
+
+  switch( solvemode )
+	{
+	case 0:
+	  result = myQuantom.solve(assumptions); break;
+  	case 1:
+	  if( incmode )
+		{
+		  result = myQuantom.maxSolveIncremental(opt, maxmode);
+		}
+	  else
+		{
+		  result = myQuantom.maxSolve(opt, assumptions, maxmode);
+		}
+	  break;
+  	case 2:
+	  result = myQuantom.maxSolveIncremental(opt, maxmode); break;
+	case 4:
+	  if( incmode )
+		{
+		  result = myQuantom.maxSolveIncremental(opt, maxmode);
+		}
+	  else
+		{
+		  result = myQuantom.maxSolve(opt, assumptions, maxmode);
+		}
+	  break;
+	case 5:
+	  liftedvars = myQuantom.solveLifting(assumptions, liftingmode, liftingsort); break;
+	default:
+	  return QUANTOM_UNKNOWN;
+	}
+
+  // Time measurement.
+  struct rusage resourcesS;
+  getrusage(RUSAGE_SELF, &resourcesS); 
+  double timeS(0.0);
+  timeS += (double) resourcesS.ru_utime.tv_sec + 1.e-6 * (double) resourcesS.ru_utime.tv_usec;
+
+  // Output.
+  std::cout << std::endl
+			<< "c #literals...........: " << myQuantom.literals()                << std::endl
+			<< "c #clauses............: " << myQuantom.clauses()                 << std::endl
+			<< "c #decisions..........: " << myQuantom.decisions()               << std::endl
+			<< "c #BCP operations.....: " << myQuantom.bcps()                    << std::endl
+			<< "c #conflicts..........: " << myQuantom.conflicts()               << std::endl
+			<< "c #solutions..........: " << myQuantom.solutions()               << std::endl
+			<< "c #pureLiterals.......: " << myQuantom.purelits()                << std::endl
+			<< "c #dcLiterals.........: " << myQuantom.dontcare()                << std::endl
+			<< "c #restarts...........: " << myQuantom.restarts()                << std::endl
+			<< "c #restartAttempts....: " << myQuantom.restartAttempts()         << std::endl
+			<< "c #clsimplifications..: " << myQuantom.clauseSimplifications()   << std::endl
+			<< "c #cusimplifications..: " << myQuantom.cubeSimplifications()     << std::endl
+			<< "c #lhbr clauses.......: " << myQuantom.lhbrclauses()             << std::endl
+			<< "c #inprocessings......: " << myQuantom.inprocessings()           << std::endl
+			<< "c cpu time............: " << timeS << "s"                        << std::endl;
+
+  // Lifting
+  if( solvemode == 5 )
+	{
+	  for( unsigned int i = 0; i != liftedvars.size(); ++i )
+		{
+		  if( (liftedvars[i]%2) != 0 )
+			{ std::cout << "-"; }
+		  std::cout << (liftedvars[i]>>1) << " ";
+		}
+	  std::cout << std::endl << "c needed vars: " << liftedvars.size() << " of " <<  assumptions.size() << std::endl;
+
+	  return QUANTOM_SAT;
+	}
+  else if( result == QUANTOM_SAT )
+	{
+	  std::cout << "s SATISFIABLE" << std::endl;
+	  // Get the satisfying variable assignment.
+
+	  std::vector< unsigned int > satmodel = myQuantom.model();
+	  std::cout << "v ";
+	  for( unsigned int i = 1; i <= maxIndexOrg; ++i )
+		//for( unsigned int i = 1; i < satmodel.size(); ++i )
+		{
+		  if( satmodel[i] == 0 )
+			{ continue; }
+		  std::cout << (((satmodel[i]&1) != 0)?"-":"") << (satmodel[i]>>1) << " ";
+		}
+	  std::cout << std::endl;
+
+	  if( solvemode >= 1 )
+		{ std::cout << "o " << opt << std::endl; }
+	  
+	  if( solvemode == 4 )
+		{
+		  std::cout << "sv ";
+		  std::vector< std::pair< unsigned int, unsigned int > > softresult( myQuantom.getAllSoftvarlevel());
+		  for(unsigned int i = 0; i != softresult.size(); ++i )
+			{
+			  std::cout << softresult[i].first << " [" << softresult[i].second << "] ";
+			}
+		  std::cout << "0" << std::endl;
+		}
+	}
+  else if ( result == QUANTOM_UNSAT )
+	{ std::cout << "s UNSATISFIABLE" << std::endl; }
+  else
+	{ std::cout << "s UNKNOWN" << std::endl; }
+
+  return result;
+}

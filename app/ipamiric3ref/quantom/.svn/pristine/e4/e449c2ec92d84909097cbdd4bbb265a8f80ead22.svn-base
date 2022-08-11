@@ -1,0 +1,23 @@
+AC_INIT(quantom,rev828,reimer/schubert@informatik.uni-freiburg.de)
+AM_INIT_AUTOMAKE(foreign)
+AC_PROG_CXX
+AM_PROG_LIBTOOL
+AC_CONFIG_MACRO_DIRS([m4])
+
+#debugging
+CXXFLAGS="-O3 -g -ffloat-store -W -Wall -Wextra -Weffc++ -Wswitch -Wsign-compare"
+
+#profiling
+#CXXFLAGS="-O3 -pg -fprofile-arcs -ftest-coverage -ffloat-store -W -Wall -Wextra -Weffc++ -Wswitch -Wsign-compare"
+
+#testing
+#CXXFLAGS="-O3 -ffloat-store -W -Wall -Wextra -Weffc++ -Wswitch -Wsign-compare"
+
+#running
+#CXXFLAGS="-O3 -DNDEBUG -ffloat-store -W -Wall -Wextra -Weffc++ -Wswitch -Wsign-compare"
+
+#-Wconversion -- for checking 32/64 bit
+
+#AC_CONFIG_MACRO_DIR([m4])
+AC_CONFIG_FILES(Makefile include/Makefile source/Makefile)
+AC_OUTPUT

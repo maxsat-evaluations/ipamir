@@ -1,0 +1,35 @@
+
+# Next three lines for combined version
+#CPPFLAGS = -DUSE_MINICRAIG -D__STDC_LIMIT_MACROS -D__STDC_FORMAT_MACROS -DCOMBSOLVER
+#LIBS = -L/export/local/linux/scratch/reimer/aigsolver/minisat-2.2.0 -L/export/local/linux/scratch/reimer/aigsolver/minisattools/lib -L/export/local/linux/scratch/reimer/aigsolver/minicraig/lib  -L/export/local/linux/scratch/reimer/aigsolver/lrabs/lib -L/export/local/linux/scratch/reimer/aigsolver/cudd/lib -L/export/local/linux/scratch/reimer/aigsolver/aigpp/lib -L/export/local/linux/scratch/reimer/aigsolver/aigqbf/lib -laigqbf -laigpp -lminicraig -lminisattools -lminisat -llrabsutil -lcudd -lmtr -lst -lepd -lutil -lrt
+#AM_CPPFLAGS = -I/export/local/linux/scratch/reimer/aigsolver/aigqbf/include -I/export/local/linux/scratch/reimer/aigsolver/aigpp/include -I/export/local/linux/scratch/reimer/aigsolver/minicraig/include -I/export/local/linux/scratch/reimer/aigsolver/lrabs/include -I/export/local/linux/scratch/reimer/aigsolver/minisattools -I/export/local/linux/scratch/reimer/aigsolver/minisat-2.2.0  -I/export/local/linux/scratch/reimer/aigsolver/cudd/include -I$(top_srcdir)/include
+
+# This line for non-combined version
+AM_CPPFLAGS = -I$(top_srcdir)/include
+
+noinst_LIBRARIES      = libquantom.a
+libquantom_a_SOURCES  = quantom.cpp cquantom.cpp
+#libquantom_a_SOURCES  = quantom.cpp
+#bin_PROGRAMS          = quantom bmcexample
+bin_PROGRAMS          = quantom
+quantom_SOURCES       = main.cpp
+quantom_LDADD         = libquantom.a
+
+#bmcexample_SOURCES    = bmc_example.cpp
+#bmcexample_LDADD      = libquantom.a
+#bmcexample_LDFLAGS    = -g
+
+#32 bit version
+#CPPFLAGS              = -m32 
+#quantom_LDFLAGS       = -m32 
+quantom_LDFLAGS       = -g
+#quantom_LDFLAGS       = -g -m32 
+
+clean-local:
+	rm -r -f *~
+	rm -r -f *.gc*	
+
+distclean-local: 	
+	rm -r -f *~
+	rm -r -f *.gc*
+	rm -r -f Makefile.in 

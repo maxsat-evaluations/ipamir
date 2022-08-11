@@ -1,0 +1,1562 @@
+#include "core.hpp"
+
+//#define IMPL_STAT
+
+#ifdef IMPL_STAT
+#include <set>
+#endif
+
+#include <deque>
+#include <map>
+
+namespace quantom {
+
+  // Performs conflict analysis for Lifting Mode
+  void Core::analyzeLifting (unsigned int* conflictingClause )
+  {
+#ifdef ANADEBUG
+    std::cout << __func__ << std::endl;
+#endif
+
+    // Update "m_incVarActivity".
+    m_incVarActivity *= m_varActMultiplier;
+
+    // Everything OK wrt. "conflictingClause"?
+    assert(conflictingClause != NULL);
+
+    // Initialization.
+    unsigned int uip(0);
+    unsigned int pos(m_dsEndIndex - 1); 
+    unsigned int finalmlevel(m_decisionLevel);
+    unsigned int elements( 0 );
+    unsigned int length( 0 );
+    unsigned int lit( 0 ); 
+    unsigned int size( 0 );
+
+    std::vector<bool> checked;
+    checked.resize( ((m_variables+1) << 1) , false); 
+
+	std::vector< unsigned int > tmpconflicting;
+
+#ifdef IMPL_STAT
+    std::vector<std::set<unsigned int > > impl_levels;
+    impl_levels.resize( m_variables+1 );
+#endif
+
+
+#ifdef ANADEBUG
+    std::cout << "conflicting clause: " << std::endl;
+    printClause(conflictingClause, true);
+    std::cout << std::endl;
+#endif
+
+    // Do we have a binary conflicting clause?
+    if (m_binConflict[0] != 0 && m_binConflict[1] != 0 )
+      {
+
+		// Get both literals of the binary conflicting clause.
+		unsigned int lit0(m_binConflict[0]);
+		unsigned int lit1(m_binConflict[1]);
+
+		tmpconflicting.push_back(lit0);
+		tmpconflicting.push_back(lit1);
+	
+		// Both "lit0" and "lit1" have to be assigned on the current decision level or we implied an universal lit.
+		assert( m_level[Lit(lit0) >> 1] == m_level[Lit(lit1) >> 1] ); 
+
+		//curDLevel = m_level[Lit(lit0) >> 1];
+		//std::cout << "set curdlevel: " << curDLevel << " due to: " << getLit(lit0) << std::endl;
+		finalmlevel = m_level[Lit(lit0) >> 1];
+
+		// Reset "m_binConflict".
+		m_binConflict[0] = 0;
+		m_binConflict[1] = 0;
+
+		// Update "checked".
+		checked[Lit(lit0)] = true;
+		checked[Lit(lit1)] = true;
+
+		elements +=2;
+
+		if( m_assignment[lit0] )
+		  {
+#ifdef ANADEBUG
+			std::cout << " push into c-clause: " << getLit(lit0) << std::endl;
+#endif
+			m_conflictClause[size++] = lit0;
+			--elements;
+
+#ifdef IMPL_STAT
+			impl_levels[lit0>>1].insert(lit1>>1);
+#endif
+		  }
+		if( m_assignment[lit1] )
+		  {
+#ifdef ANADEBUG
+			std::cout << " push into c-clause: " << getLit(lit1) << std::endl;;
+#endif
+			m_conflictClause[size++] = lit1;
+			--elements;
+
+#ifdef IMPL_STAT
+			impl_levels[lit1>>1].insert(lit0>>1);
+#endif
+		  }
+
+		// Analyse the next clause.
+		goto NEXT_CLAUSE;
+      }
+    else 
+      {
+		unsigned int l(0);
+		while( conflictingClause[l] != 0 )
+		  {
+			tmpconflicting.push_back(conflictingClause[l]);
+			if( m_assignment[conflictingClause[l]] )
+			  {
+#ifdef ANADEBUG
+				std::cout << " push into c-clause: " << getLit(conflictingClause[l]) << std::endl;
+
+#endif
+				m_conflictClause[size++] = conflictingClause[l];
+#ifdef IMPL_STAT
+				impl_levels[conflictingClause[l]>>1].insert(conflictingClause[l]>>1);
+#endif
+			  }
+			if( m_level[conflictingClause[l]>>1] > m_level[uip>>1] )
+			  { uip = conflictingClause[l]; }
+			++l;
+		  }
+      }
+
+    // Perform conflict analysis according to the 1UIP scheme.
+    do
+      {
+		// Initialization.
+		lit = conflictingClause[length]; 
+
+		// Analyze the literals of the current non-binary conflicting clause.
+		do
+		  {
+			// Get the index of "lit".
+			unsigned int index(lit >> 1); 
+
+#ifdef ANADEBUG
+			std::cout << getLit(lit) << (isUniversal(lit)?" (u) ":" (e) ") << "checked: " << checked[Lit(lit)] << "," << checked[Lit(lit)^1] << " mlevel: " << m_level[index] << " qlevel: " << q_level[index] << " qreason: " << q_reason[Lit(lit)>>1];
+#endif
+
+#ifdef IMPL_STAT
+			impl_levels[uip>>1].insert(lit>>1);
+#endif
+
+			// "lit" not checked so far?
+			if ( !checked[lit] )
+			  {
+				// If we already have checked the literal with the opposite polarity, we have a tautology clause
+				// This may only happen with universal literal
+
+				// Update "checked".
+				checked[lit] = true;
+
+				if( !m_assignment[lit] && ( m_level[index] > 0 ) )
+				  { 
+					//std::cout << "impl " << getLit(uip) << "= " << m_level[index] << std::endl;
+
+					// Is "lit" forced?
+					if ( m_forcing[index] != NULL || m_binForcing[index] != 0 )
+					  { 
+			
+						if( finalmlevel > m_level[index] )
+						  { 
+							finalmlevel = m_level[index]; 
+#ifdef ANADEBUG
+							std::cout << "new final mlevel: " << finalmlevel << std::endl;
+#endif
+						  }
+			
+ 
+						++elements;
+
+#ifdef ANADEBUG
+						std::cout << " ++el-end: " << elements;
+#endif
+					  }
+					else if ( m_level[index] > 0 )
+					  {
+						// What about the decision level "lit" has been assigned on?
+						// Checking the decision level on which a particular variable has been 
+						// assigned, requires that assumptions are stored on decision levels 
+						// greater 0. Otherwise we run into problems in the incremental mode. 
+						m_conflictClause[size++] = lit; 
+
+#ifdef IMPL_STAT
+						impl_levels[lit>>1].insert(lit>>1);
+#endif
+
+#ifdef ANADEBUG
+						std::cout << " push into c-clause: " << getLit(lit) << std::endl;
+						std::cout << "m_conflictingclause: " << std::endl;
+						for( unsigned int k = 0; k != size; ++k )
+						  {
+							std::cout << getLit(m_conflictClause[k]) << " ";
+						  }
+						std::cout << std::endl;
+#endif
+					  }
+				  }
+			  }
+			  
+#ifdef ANADEBUG
+			std::cout << std::endl;
+#endif
+			// Increment "length".
+			++length;
+
+			// Get the next literal to be checked.
+			lit = conflictingClause[length]; 
+
+		  } while (lit != 0);
+
+      NEXT_CLAUSE:
+
+		// Determine the next clause to be processed.
+		while ( !checked[ Lit(m_decisionStack[pos])^1 ] && ( m_level[Lit(m_decisionStack[pos])>>1] >= finalmlevel || isDC(m_decisionStack[pos]) ) ) 
+		  { --pos; }
+
+		if( (m_level[Lit(m_decisionStack[pos])>>1] == 0 || m_level[Lit(m_decisionStack[pos])>>1] < finalmlevel ) && !isDC(m_decisionStack[pos]) )
+		  { break; }
+
+#ifdef ANADEBUG
+		std::cout << getLit(m_decisionStack[pos]) << " elements: " << elements << " checked: " << checked[Lit(m_decisionStack[pos])] << "," << checked[Lit(m_decisionStack[pos])^1] << std::endl;
+#endif
+
+		uip = m_decisionStack[pos];
+
+#ifdef ANADEBUG
+		std::cout << "next uip: " << getLit(uip) << (isUniversal(uip)?" (u) ":" (e) ") << "mlevel: " << m_level[Lit(uip)>>1] << " qlevel: " << q_level[Lit(uip)>>1] << " pos: " << pos << std::endl;
+#endif
+
+		// Do we have a binary forcing clause?
+		if ( m_binForcing[uip >> 1] != 0 )
+		  {
+			// Get the "second" literal (not the one equal to "uip").
+			unsigned int L(m_binForcing[uip >> 1]); 
+
+#ifdef ANADEBUG
+			std::cout << "is bin with " << getLit(L) << " on level " << m_level[L>>1] << std::endl;
+#endif
+			checked[uip] = true;
+
+#ifdef IMPL_STAT
+			impl_levels[uip>>1].insert(L>>1);
+#endif
+
+			// "L" not checked so far?
+			if (!checked[L])
+			  {
+				// Update "checked".
+				checked[L] = true;
+
+				// Increment "elements", assuming that both literals of the binary 
+				// forcing clause have been assigned on the current decision level.
+				//assert(m_level[L >> 1] == curDLevel);
+
+				if ( m_forcing[L>>1] != NULL || m_binForcing[L>>1] != 0 )
+				  { 
+		    
+					if( finalmlevel > m_level[L>>1] )
+					  { 
+						finalmlevel = m_level[L>>1]; 
+#ifdef ANADEBUG
+						std::cout << "new final mlevel: " << finalmlevel << std::endl;
+#endif
+					  }
+		    
+ 
+					++elements;
+#ifdef ANADEBUG
+					std::cout << " ++el-end: " << elements << std::endl;
+#endif
+				  }
+				else if ( m_level[L>>1] > 0 )
+				  {
+					// What about the decision level "lit" has been assigned on?
+					// Checking the decision level on which a particular variable has been 
+					// assigned, requires that assumptions are stored on decision levels 
+					// greater 0. Otherwise we run into problems in the incremental mode. 
+					m_conflictClause[size++] = L; 
+#ifdef ANADEBUG
+					std::cout << " push into c-clause: " << getLit(L) << std::endl;
+					std::cout << "m_conflictingclause: " << std::endl;
+					for( unsigned int k = 0; k != size; ++k )
+					  {
+						std::cout << getLit(m_conflictClause[k]) << " ";
+					  }
+					std::cout << std::endl;
+#endif
+				  }
+			  }
+
+			// Update the status variables.
+			--pos;
+			--elements;
+			length = 0;
+
+			// Analyse the next clause.
+			goto NEXT_CLAUSE;
+		  }
+
+		// Update the status variables.
+		conflictingClause = m_forcing[Lit(uip) >> 1];
+		length = 0;
+
+#ifdef ANADEBUG
+		std::cout << "next conflictclause: " << std::endl;
+		printClause(conflictingClause, true);
+		std::cout << std::endl << "elements: " << elements << std::endl;
+		std::cout << "m_conflictingclause: " << std::endl;
+		for( unsigned int k = 0; k != size; ++k )
+		  {
+			std::cout << getLit(m_conflictClause[k]) << " ";
+		  }
+		std::cout << std::endl;
+#endif
+
+		if( conflictingClause == NULL )
+		  {
+			if (elements > 0 )
+			  {
+#ifdef IMPL_STAT
+				impl_levels[uip>>1].insert(uip>>1);
+#endif
+				--pos;
+
+				goto NEXT_CLAUSE;
+			  }
+			break;
+		  }
+		else if ( elements == 1 )
+		  { ++elements; }
+
+		--pos;
+		--elements;
+		  
+      } while ( elements > 0 );
+
+	m_conflictClause[size++] = 0;
+
+	//getCompleteImplGraph( tmpconflicting );
+
+#ifdef IMPL_STAT
+    std::cout << std::endl << "forcing levels:" << std::endl;
+    for( unsigned int f = 1; f != impl_levels.size(); ++f)
+      {
+		if( impl_levels[f].empty() )
+		  { continue; }
+		std::cout << "v= " << f << "(" << m_level[f] << "): ";
+		for( std::set<unsigned int>::iterator g = impl_levels[f].begin(); g != impl_levels[f].end(); ++g)
+		  {
+			std::cout << *g << " (" << m_level[*g] << ") ";
+		  }
+		std::cout << std::endl;
+      }
+#endif
+	
+    return;
+  }
+
+#if 0
+  // calculates the complete implication graph.
+  void Core::getCompleteImplGraph( const std::vector< unsigned int >& conflictingClause )
+  {
+	std::cout << __func__ << std::endl;
+
+	std::cout << std::endl;
+
+	markClauses( m_dsImplIndex );
+
+	// for each variable a list of clauses
+	std::vector< std::vector< std::vector< unsigned int > > > implications;
+	implications.resize(m_variables+1);
+
+	std::vector< std::vector< std::vector< unsigned int > > > imploccur;
+	imploccur.resize(m_variables+1);
+
+	/*
+	unsigned int lit(0);
+
+	// Determine implications for lits in empty clause.
+	for( unsigned int i = 0; i != conflictingClause.size(); ++i )
+	  {
+		lit = conflictingClause[i];
+		// this can happen if the current assumption conflicts with this clause
+		if( m_assignment[lit] )
+		  { lit = lit^1; }
+
+		collectLitImplications( lit^1, implications, checked, imploccur );
+		proceed.push_back(lit>>1);
+	  }
+	*/
+
+	//unsigned int pos(m_dsEndIndex-1);
+
+	std::cout << "proceed stack" << std::endl;
+
+	/*
+	// Determine the first implication to be processed.
+	while ( !checked[ m_decisionStack[pos]>>1 ] || proceed[ m_decisionStack[pos]>>1 ] ) 
+	  { 
+		std::cout << pos << " lit: " << getLit( m_decisionStack[pos] ) << " ch: " << checked[ m_decisionStack[pos]>>1 ] << " pr: " <<  proceed[ m_decisionStack[pos]>>1 ] << std::endl;
+		--pos; 
+	  }
+	*/
+	
+	for( unsigned int pos = 1; pos != m_dsEndIndex; ++pos )
+	  {
+		unsigned int uip = m_decisionStack[pos];
+		std::cout << "next uip: " << getLit(uip) << " (" << pos << ")" << std::endl;
+
+		collectLitImplications( uip, implications, imploccur );
+  	
+		std::cout << "get next lit" << std::endl;
+		/*
+		--pos;
+		// Determine the next implication to be processed.
+		while ( !checked[ m_decisionStack[pos]>>1 ] || proceed[ m_decisionStack[pos]>>1 ] ) 
+		  { 
+			std::cout << pos << " lit: " << getLit( m_decisionStack[pos] ) << " ch: " << checked[ m_decisionStack[pos]>>1 ] << " pr: " <<  proceed[ m_decisionStack[pos]>>1 ] << std::endl;
+			--pos; 
+		  }
+		*/
+	  }
+
+	// print implication graph
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		std::cout << "var: " << i << " forcing clauses (" << ( implications[i].size() ) << ")" << std::endl;
+		for( unsigned int j = 0; j != implications[i].size(); ++j )
+		  {
+			printClause( implications[i][j] );
+			std::cout << std::endl;
+		  }
+	  }
+
+	std::cout << "occurences: " << std::endl;
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		std::cout << "var: " << i << std::endl;
+		for( unsigned int j = 0; j != imploccur[i].size(); ++j )
+		  {
+			printClause( imploccur[i][j] );
+			std::cout << std::endl;
+		  }
+	  }
+	getInputToOutputImpl( implications, imploccur );
+  }
+#endif
+
+  void Core::collectLitImplications ( unsigned int lit, std::vector< std::vector< std::vector <unsigned int> > >& implications, std::vector< std::vector< std::vector< unsigned int > > >& imploccur )
+  {
+	std::cout << "lit: " << getLit(lit) << std::endl;
+	unsigned int index(lit>>1);
+
+	std::cout << "bins: " << std::endl;
+	for( size_t b = 0; b != m_binWatches[lit].size(); ++b )
+	  {
+		std::cout << getLit(lit) << " [" << assignedTo(lit) << "] " << getLit( m_binWatches[lit][b]) << " [" << assignedTo(m_binWatches[lit][b]) << "] " << std::endl;
+
+		if( m_assignment[ m_binWatches[lit][b]^1 ] )
+		  {
+			// introduce new dummy clause for binary implication
+			std::vector< unsigned int > cptr(2,0);
+			cptr[0] = lit;
+			cptr[1] = m_binWatches[lit][b];
+			implications[index].push_back( cptr );
+			imploccur[ m_binWatches[lit][b]>>1 ].push_back( cptr );
+				
+			std::cout << "add ";
+			printClause( cptr );
+			std::cout << " to " << getLit(lit) << std::endl;
+			//checked[m_binWatches[lit][b]>>1] = true;
+		  }
+	  }
+
+	std::cout << "n-nary: " << std::endl;
+   	for( size_t j = 0; j != q_occur[lit].size(); ++j )
+	  {
+		printClause( q_occur[lit][j]->clause());
+		std::cout << std::endl;
+		// Implication? Then wl0 is assigned true and wl1 is not true.
+		if( m_assignment[ q_occur[lit][j]->wl0 ] && m_assignment[ (q_occur[lit][j]->wl1)^1 ] )
+		  {
+			// Check, if there is really no other positive assigned lit
+			std::cout << "check" << std::endl;
+			unsigned int pos(0);
+			while( q_occur[lit][j]->clause()[pos] != 0 )
+			  {
+				if( ( (q_occur[lit][j]->clause()[pos] != q_occur[lit][j]->wl0) &&
+					  !m_assignment[q_occur[lit][j]->clause()[pos]^1] ) )
+				  { break; }
+				++pos;
+			  }
+			// not a input to output implication
+			if( q_occur[lit][j]->clause()[pos] != 0 )
+			  { continue; }
+
+			std::cout << "implication! " << std::endl;
+
+			std::vector< unsigned int> dummyclause;
+			dummyclause.reserve( q_occur[lit][j]->size() );
+
+			pos = 0;
+			//bool addclause(true);
+			// Mark all implied literals to be checked
+			while( q_occur[lit][j]->clause()[pos] != 0 )
+			  {
+				std::cout << "check " << getLit(q_occur[lit][j]->clause()[pos]) << std::endl;
+				dummyclause.push_back(q_occur[lit][j]->clause()[pos]);
+				if( q_occur[lit][j]->clause()[pos] == q_occur[lit][j]->wl0 )
+				  { 
+					// ensure that implied literal is on position 0
+					dummyclause.back() = dummyclause[0];
+					dummyclause[0] = q_occur[lit][j]->clause()[pos];
+					++pos;
+					continue;
+				  }
+				
+				//checked[q_occur[lit][j]->clause()[pos]>>1] = true;
+				++pos;
+			  }
+						
+
+			std::cout << "add implication" << std::endl;
+			// Add clause to implication list
+			implications[index].push_back(dummyclause);			
+			pos = 0;
+			while( q_occur[lit][j]->clause()[pos] != 0 )
+			  { 
+				if( q_occur[lit][j]->clause()[pos] != q_occur[lit][j]->wl0 )
+				  { imploccur[q_occur[lit][j]->clause()[pos]>>1].push_back(dummyclause); }
+				++pos;
+			  }
+
+			std::cout << "add ";
+			printClause( q_occur[lit][j]->clause() );
+			std::cout << " to " << getLit(lit) << std::endl;
+		  }
+	  }		
+  }
+
+  void Core::getInputToOutputImpl( std::vector< std::vector< std::vector< unsigned int > > >& implications, std::vector< std::vector< std::vector< unsigned int > > >& imploccur )
+  {
+	std::cout << __func__ << std::endl;
+	std::vector< unsigned int > impllevel( m_variables+1, m_variables+2 );
+
+	std::deque< unsigned int > pending;
+	
+	for( unsigned int i = 0; i != q_assumptions.size(); ++i )
+	  {
+		pending.push_back(q_assumptions[i]>>1);
+		impllevel[q_assumptions[i]>>1] = 1;
+	  }
+
+	while( !pending.empty() )
+	  {
+		unsigned int var = pending.front();
+		pending.pop_front();
+		std::cout << "var: " << var << std::endl;
+
+		for( size_t i = 0; i != imploccur[var].size(); ++i )
+		  {
+			std::cout << "clause: ";
+			printClause(imploccur[var][i]);
+			std::cout << std::endl;
+			  
+			unsigned int level = 0;
+			for( size_t j = 1; j != imploccur[var][i].size(); ++j )
+			  {
+				if( level < impllevel[ imploccur[var][i][j]>>1 ] )
+				  { level = impllevel[ imploccur[var][i][j]>>1 ]; }
+			  }
+
+			if( impllevel[ imploccur[var][i][0]>>1 ] > (level+1) )
+			  { 
+				impllevel[ imploccur[var][i][0]>>1 ] = level+1;
+				std::cout << "level of " << (imploccur[var][i][0]>>1) << " = " << (level+1) << std::endl;
+				pending.push_back(imploccur[var][i][0]>>1);
+			  }
+		  }
+	  }
+
+	std::cout << "levels: " << std::endl;
+	for( unsigned int l = 1; l != impllevel.size(); ++l )
+	  {
+		std::cout << "var: " << l << " level: " << impllevel[l] << std::endl;
+	  }
+
+	// for every variable...
+	for( size_t i = 1; i <= m_variables; ++i )
+	  {
+		size_t size = implications[i].size();
+		unsigned int level = impllevel[i];
+		std::cout << "var: " << i << " level: " << level << std::endl;
+
+		// for every forcing clause...
+		for( size_t j = 0; j < size ; ++j )
+		  {
+			assert( (implications[i][j][0]>>1) == i );
+			std::cout << "clause" << std::endl;
+			printClause(implications[i][j]);
+			// for every literal...
+			for( size_t k = 1; k != implications[i][j].size(); ++k )
+			  {
+				// not input to output forcing clause...
+				if( level < impllevel[implications[i][j][k]>>1] ) 
+				  { 
+					std::cout << " delete!";
+					implications[i][j] = implications[i][--size];
+					implications[i].pop_back();
+					--j;
+					break;
+				  }
+			  }
+			std::cout << std::endl;
+		  }
+	  }
+
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		std::cout << "var: " << i << " forcing clauses (" << ( implications[i].size() ) << ")" << std::endl;
+		for( unsigned int j = 0; j != implications[i].size(); ++j )
+		  {
+			printClause( implications[i][j] );
+			std::cout << std::endl;
+		  }
+	  }
+
+	pending.clear();
+
+	for( unsigned int i = 0; i != q_assumptions.size(); ++i )
+	  { pending.push_back(q_assumptions[i]>>1); }
+	
+	while( !pending.empty() )
+	  {
+		unsigned int var = pending.front();
+		pending.pop_front();
+		std::cout << "var: " << var << std::endl;
+
+		for( size_t i = 0; i != imploccur[var].size(); ++i )
+		  {
+			std::cout << "clause: ";
+			printClause(imploccur[var][i]);
+			std::cout << std::endl;
+			  
+			pending.push_back(imploccur[var][i][0]>>1);
+
+			if( impllevel[imploccur[var][i][0]>>1] > 2 )
+			  {
+				for( size_t j = 0; j != implications[var].size(); ++j )
+				  { mergeImplications( implications[var][j], implications ); }
+			  }
+		  }
+	  }
+
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		std::cout << "var: " << i << " forcing clauses (" << ( implications[i].size() ) << ")" << std::endl;
+		for( unsigned int j = 0; j != implications[i].size(); ++j )
+		  {
+			printClause( implications[i][j] );
+			std::cout << std::endl;
+		  }
+	  }
+  }
+
+  void Core::mergeImplications( std::vector< unsigned int >& clause, std::vector< std::vector< std::vector< unsigned int > > >& implications )
+  {
+	unsigned int impl = clause[0]>>1;
+	std::cout << __func__  << " " << impl << std::endl;
+	
+	for( size_t i = 1; i != clause.size(); ++i )
+	  {
+		unsigned int var = clause[i]>>1;
+		std::cout << "var:" << var << std::endl;
+		if( !implications[var].empty() )
+		  {
+			std::cout << "merge!" << std::endl;
+			std::vector< unsigned int > newclause = clause;
+			printClause( newclause );
+			std::cout << std::endl; 
+			newclause[i] = newclause[clause.size()-1];
+			newclause.pop_back();
+			
+			std::cout << "with: " << std::endl;;
+
+			for( size_t j = 0; j != implications[var].size(); ++j )
+			  {
+				std::vector< unsigned int > tmpclause = newclause;
+
+				printClause( implications[var][j] );
+				std::cout << std::endl;
+				
+				for( size_t k = 1; k != implications[var][j].size(); ++k )
+				  {
+					tmpclause.push_back(implications[var][j][k]);
+				  }
+				std::cout << "result: " << std::endl;
+				printClause( tmpclause );
+				std::cout << std::endl;
+				implications[impl].push_back(tmpclause);
+			  }
+		  }
+	  }
+  }
+
+
+  // lifts a solution, given by the variables in "assumptions"
+  // returns the assumption literals which are needed to satisfy the property
+  // liftingmodi:
+  // 1 : conflict driven
+  // 2 : assumptions driven
+  // 3 : combine 1+2
+  // 4 : formula based
+  // note: mode 1-3 need negated property, mode 4 the non-negated property
+  // the formula with negated property must be UNSAT, with non-negated property SAT
+  std::vector< unsigned int > Core::solveLifting( std::vector<unsigned int>& assumptions, unsigned int liftingmode, unsigned int sortmode ) 
+  {
+#ifdef DEBUG
+    std::cout << "start solving lifting " << sortmode << std::endl;
+	std::cout << "empty: " << m_emptyClause << std::endl;
+#endif
+    std::vector< unsigned int > neededlits;
+
+    // If there are no variables, the CNF formula is satisfiable by definition.
+    if (m_variables == 0 || ( m_clauseDatabase.empty() && m_binWatches.empty() ) || assumptions.empty() ) 
+      { return assumptions; }
+
+	// The QBF solving process has to be started on decision level 0.
+    assert(m_decisionLevel == 0);
+
+    // If "m_binConflict" is not equal to (0,0), we might have a problem.
+    assert(m_binConflict[0] == 0 && m_binConflict[1] == 0);
+
+    m_rootLevel = 0;
+
+    setupLitLists(false);
+
+	srand((unsigned int)time(0));
+
+    if( liftingmode == 1 || liftingmode == 3 )
+      {
+		bool receivedconflict = false;
+
+		std::vector< std::pair< unsigned int, unsigned int > > actvector;
+		
+		for(unsigned int a = 0; a != assumptions.size(); ++a )
+		  {
+			unsigned int lit = assumptions[a];
+			setDontTouch(lit>>1);
+			q_assumptions.push_back(lit);
+			unsigned int activity = m_binWatches[lit^1].size();// + q_occur[var^1].size();
+			if( sortmode & 16 )
+			  { activity = Lit(assumptions[a]); }
+			
+			actvector.push_back( std::pair< unsigned int, unsigned int>(lit, activity) );
+#ifdef DEBUG
+			std::cout << getLit(lit) << " (" << activity << ") ";
+#endif
+		  }
+#ifdef DEBUG
+		std::cout << " [" << actvector.size() << "]" << std::endl;
+#endif
+
+		if( sortmode & 1 )
+		  { std::sort( actvector.begin(), actvector.end(), sortPairBySecond<unsigned int, unsigned int>); }
+		else if ( sortmode & 2 )
+		  { std::sort( actvector.begin(), actvector.end(), sortPairBySecondReverse<unsigned int, unsigned int>); }
+
+#ifdef DEBUG
+		std::cout << "begin assum" << std::endl;
+		for( unsigned int b = 0; b != actvector.size(); ++b )
+		  {
+			std::cout << getLit(actvector[b].first) << " (" << actvector[b].second << ") ";
+		  }
+		std::cout << " [" << actvector.size() << "]" << std::endl;
+#endif
+
+
+		// Set all assignments specified by "assumptions".
+		for (unsigned int c = 0 ; c != actvector.size(); ++c )
+		  {
+			// Get the next assignment.
+			unsigned int lit(actvector[c].first);
+
+			//#ifdef DEBUG
+			std::cout << "add assumption... " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+			//#endif
+
+			// variable has to be initialized before
+			assert( (lit >> 1) <= m_variables);
+
+			//#ifdef DEBUG
+			std::cout << "is pure: " << isPure(lit) << " isDC: " << isDC(lit) << " m_level: " << m_level[lit>>1] << std::endl;
+			//#endif
+
+			// "lit" already incorrectly assigned?
+			if (m_assignment[lit ^ 1])
+			  {
+
+				std::cout << "incorrectly assigned" << std::endl;
+				if( m_level[lit>>1] != 0 )
+				  {
+					if( m_forcing[lit>>1] != NULL )
+					  {
+						assert( m_binForcing[lit>>1] == 0 );
+						analyzeLifting( m_forcing[lit>>1] );
+					  }
+					else
+					  {
+						assert( m_binForcing[lit>>1] != 0 );
+						m_binConflict[0] = lit^1;
+						m_binConflict[1] = m_binForcing[lit>>1];
+						analyzeLifting( &m_binConflict[0] );
+					  }
+				  }
+				else
+				  {
+					std::cout << "add to needed lits " << std::endl;
+					neededlits.push_back(lit);
+				  }
+
+				// Backtrack to decision level 0.
+				if (m_decisionLevel > q_backtracklevel)
+				  {
+					backtrack(q_backtracklevel);
+				  }
+ 
+				unsigned int p(0);
+				while( m_conflictClause[p] != 0 )
+				  {
+					std::cout << "add " << m_conflictClause[p] <<  " to needed lits " << std::endl;
+					neededlits.push_back(m_conflictClause[p]^1);
+					++p;
+				  }
+				receivedconflict = true;
+				break;
+			  }
+			// "lit" currently unassigned?
+			else if (!m_assignment[lit])
+			  { 
+				//#ifdef DEBUG
+				std::cout << "add assumption: " << getLit(lit) << std::endl;
+				//#endif
+				// Push "lit" as a "fake decision" onto the decision stack.
+				addDecision(lit); 
+	    
+				// What about the effects of this implication?
+				unsigned int* conclause = NULL;
+				if ( ( conclause = deduce(false) ) != NULL)
+				  {
+					//#ifdef DEBUG
+					std::cout << "conflict with assumption" << std::endl;
+					//#endif
+					receivedconflict = true;
+					analyzeLifting( conclause );
+					// Backtrack to decision level 0.
+					backtrack(q_backtracklevel); 
+
+					// Reset "m_binConflict".
+					m_binConflict[0] = 0;
+					m_binConflict[1] = 0;
+
+					unsigned int p(0);
+					while( m_conflictClause[p] != 0 )
+					  {
+						neededlits.push_back(m_conflictClause[p]^1);
+						++p;
+					  }
+					break;
+				  }
+			  }
+
+			// Push "lit" as a "fake decision" onto the decision stack.
+			if (!m_assignment[lit])
+			  {
+				addDecision(lit); 
+			  }
+		  }
+
+		// What about the effects of this implication?
+		unsigned int* conclause = NULL;
+		if ( ( conclause = deduce(false) ) != NULL)
+		  {
+			//#ifdef DEBUG
+			std::cout << "conflict with assumption" << std::endl;
+			//#endif
+			receivedconflict = true;
+			analyzeLifting( conclause );
+			// Backtrack to decision level 0.
+			backtrack(q_backtracklevel); 
+
+			// Reset "m_binConflict".
+			m_binConflict[0] = 0;
+			m_binConflict[1] = 0;
+
+			unsigned int p(0);
+			while( m_conflictClause[p] != 0 )
+			  {
+				neededlits.push_back(m_conflictClause[p]^1);
+				++p;
+			  }
+		  }
+
+#ifdef DEBUG
+		std::cout << "receivedconflict: " << receivedconflict << std::endl;
+
+		for( unsigned int vo = 1; vo <= m_variables; ++vo)
+		  {
+			if( q_deleted[vo] )
+			  { continue; }
+			
+			std::cout << vo << " [" << assignedTo(vo<<1) << "] ";
+		  }
+		std::cout << std::endl;
+
+		for( unsigned int vo = 1; vo <= m_variables; ++vo )
+		  {
+			for( unsigned int bo = 0; bo != m_binWatches[vo<<1].size() ; ++bo )
+			  {
+				std::cout << vo << " [" << assignedTo(vo<<1) << "] " << getLit(m_binWatches[vo<<1][bo]) << " [" << assignedTo(m_binWatches[vo<<1][bo]) << "]" << std::endl;
+			  }
+			for( unsigned int bo = 0; bo != m_binWatches[(vo<<1)^1].size() ; ++bo )
+			  {
+				std::cout << "-" << vo << " [" << assignedTo((vo<<1)^1) << "] " << getLit(m_binWatches[(vo<<1)^1][bo]) << " [" << assignedTo(m_binWatches[(vo<<1)^1][bo]) << "]" << std::endl;
+			  }
+		  }
+		for( unsigned int du = 0; du != m_clauseDatabase.size(); ++du )
+		  {
+			printClause(m_clauseDatabase[du]->clause());
+			std::cout << std::endl;
+		  }
+
+		std::cout << "intermediate" << std::endl;
+		for( unsigned int lif = 0; lif != neededlits.size(); ++lif )
+		  {
+			if( lif != 0 )
+			  { std::cout << ", "; }
+			std::cout << getLit(neededlits[lif]);
+		  }
+		std::cout << " [" << neededlits.size() << "]" << std::endl;
+#endif
+
+		if( !receivedconflict )
+		  {
+			std::cout << "ERROR: no conflict received" << std::endl;
+			assert(false);
+			return neededlits;
+		  }
+		if( liftingmode == 1 )
+		  {
+			std::cout << "return with size: " << neededlits.size() << std::endl;
+			return neededlits;
+		  }
+		
+      }
+
+    if( liftingmode == 4 )
+      {
+
+		for (unsigned int v = m_variables; v > 0; --v)
+		  {
+			if( q_level[v] == 0 || q_deleted[v] ) 
+			  { continue; }
+
+			// setup cache
+			if( (m_binWatches[v<<1].size() + q_occur[v<<1].size()) < (m_binWatches[(v<<1)^1].size() + q_occur[(v<<1)^1].size()))
+			  { m_cache[v] = false; }
+			else
+			  { m_cache[v] = true; }
+
+			// setup activities
+			m_activity[v] += (double)m_incVarActivity * (double)(m_binWatches[v << 1].size() + (double)m_binWatches[(v << 1) ^ 1].size()); 
+			  
+			m_activity2[v] += (unsigned int)m_binWatches[v<<1].size() + (unsigned int)m_binWatches[(v<<1)+1].size();
+		  }
+
+		// still setup activities
+		unsigned int size((unsigned int)m_clauseDatabase.size());
+		for (unsigned int c = 0; c < size; ++c)
+		  {
+			unsigned int* clause(m_clauseDatabase[c]->clause());
+			unsigned int p(0);
+			while (clause[p] != 0)
+			  {
+				m_activity[clause[p] >> 1] += m_incVarActivity;
+				++p;
+			  }
+		  }
+			  
+		// Now, use the non-binary clauses to update the activities.
+		size = (unsigned int)q_occur.size();
+		for (unsigned int c = 2; c < size; c+=2)
+		  { 
+			m_activity2[c>>1] += (unsigned int)q_occur[c].size() + (unsigned int)q_occur[c+1].size();
+		  }
+
+#ifdef OUTPUT
+		std::cout << "c start solving with " << m_literals << " literals and " << m_clauses << " clauses" << std::endl;
+#endif
+
+#ifdef DEBUG
+		printdatabase();
+		exportDatabase();
+#endif
+
+		// Set all assignments specified by "assumptions".
+		for (unsigned int a = 0; a < assumptions.size(); ++a)
+		  {
+			// Get the next assignment.
+			unsigned int lit(assumptions[a]);
+
+#ifdef DEBUG
+			std::cout << "set preference for assumption " << getLit(lit) << std::endl;
+#endif
+			m_cache[lit>>1] = lit&1;
+			m_activity[lit>>1] = 10000000;
+		  }
+
+		for(unsigned int v = 1; v <= m_variables; ++v)
+		  {
+			if ( !m_assignment[v << 1] && !m_assignment[(v << 1)^1] && !q_varOrder[(q_level[v]-1)]->inHeap(v) )
+			  { 
+				q_varOrder[(q_level[v]-1)]->insert(v); 
+			  }
+		  }
+		// Initialization.
+		unsigned int* conflictingClause(NULL);
+
+		// The main solving loop.
+		while (decide())
+		  {
+			// Perform "Boolean Constraint Propagation".
+			while ((conflictingClause = deduce()) != NULL)
+			  {
+				assert( m_decisionLevel != 0 );
+
+				if( !analyze(conflictingClause) )
+				  { assert(false); }
+			  }
+		  }
+		generateModel();
+		  
+		for( unsigned int m = 0; m != assumptions.size(); ++m )
+		  {
+#ifdef DEBUG
+			std::cout << "assumption: " << getLit(assumptions[m]) << " [" << assignedTo(assumptions[m]) << "] model: " << getLit(m_model[assumptions[m]>>1]) << std::endl;
+#endif
+			if( m_model[assumptions[m]>>1] == assumptions[m] )
+			  { neededlits.push_back(assumptions[m]); }
+		  }
+
+		return neededlits;
+      }
+
+    if( liftingmode == 2 || liftingmode == 3 )
+      {
+		std::vector< unsigned int > lits;
+		std::vector< std::pair< unsigned int, unsigned int > > actvector;
+
+		if( liftingmode == 2 )
+		  { lits = assumptions; }
+		else if( liftingmode == 3 )
+		  { 
+		    lits = neededlits; 
+			neededlits.clear();
+		  }
+
+		for(unsigned int a = 0; a != lits.size(); ++a )
+		  {
+			unsigned int lit = lits[a];
+
+			setDontTouch(lit>>1);
+
+			unsigned int activity = m_binWatches[lit^1].size();// + q_occur[var^1].size();
+			if( sortmode & 32 )
+			  { activity = Lit(assumptions[a]); }
+
+			actvector.push_back( std::pair< unsigned int, unsigned int>(lit, activity) );
+#ifdef DEBUG
+			unsigned int activity2 = m_binWatches[lit].size() + q_occur[lit].size();
+			std::cout << getLit(lit) << " (" << activity2 << "," << activity << ") ";
+#endif
+		  }
+#ifdef DEBUG
+		std::cout << std::endl;
+#endif
+
+		if( sortmode & 4 )
+		  { std::sort( actvector.begin(), actvector.end(), sortPairBySecond<unsigned int, unsigned int>); }
+		else if ( sortmode & 8 )
+		  { std::sort( actvector.begin(), actvector.end(), sortPairBySecondReverse<unsigned int, unsigned int>); }
+
+#ifdef DEBUG
+		std::cout << "intermediate result" << std::endl;
+		for( unsigned int b = 0; b != actvector.size(); ++b )
+		  {
+			std::cout << getLit(actvector[b].first) << " (" << actvector[b].second << ") ";
+		  }
+		std::cout << " [" << actvector.size() << "]" << std::endl;
+#endif
+
+		unsigned int backtracklevel(0);
+
+		// Set all assignments specified by "assumptions".
+		for( unsigned int a = 0; a != actvector.size(); ++a)
+		  {
+			// Get the next assignment.
+			unsigned int lit = actvector[a].first;
+
+			std::vector< unsigned int > currentassumptions;
+
+#ifdef DEBUG
+			std::cout << "add assumption... " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+			assert( (lit >> 1) <= m_variables);
+
+			if( isDC(lit) || lit == 0 )
+			  {
+#ifdef DEBUG
+				std::cout << "assumption is already don't care -> ignore assumption" << std::endl;
+#endif 
+				continue;
+			  }
+
+			for( unsigned int b = 0; b != actvector.size(); ++b )
+			  {
+				if( b == a )
+				  {
+					currentassumptions.push_back(lit^1);
+#ifdef DEBUG
+					std::cout << "add swapped assumption " << getLit(lit^1) << std::endl;
+#endif
+				  }
+				else if( actvector[b].first != 0 )
+				  {
+					//currentassumptions.push_back(vars[b]);
+					currentassumptions.push_back(actvector[b].first);
+#ifdef DEBUG
+					std::cout << "add normal assumption " << getLit(actvector[b].first) << std::endl;
+#endif
+				  }
+#ifdef DEBUG
+				else
+				  {
+					std::cout << "skip " << std::endl;
+				  }
+#endif
+			  }
+				
+			q_liftingmode = 3;
+
+			// Backtrack to level 0 again for last instance
+			if( a == (actvector.size()-1) )
+			  { backtracklevel = 0; }
+
+			setBacktracklevel(backtracklevel);
+
+			unsigned int sat = solve( currentassumptions );
+#ifdef DEBUG
+			std::cout << "result: " << sat << std::endl;
+#endif
+		  
+			++backtracklevel;
+			if( sat == 20 )
+			  {
+				actvector[a].first = 0;
+				--backtracklevel;
+			  }
+		  }
+
+
+		assert(neededlits.empty());
+		for( unsigned int v = 0; v != actvector.size(); ++v )
+		  {
+			if( actvector[v].first == 0 )
+			  { continue; }
+
+			neededlits.push_back(actvector[v].first);
+		  }
+      }
+    return neededlits;
+  }
+
+  bool Core::solution_lifting( std::vector< std::pair< unsigned int, unsigned int > >& actvector )
+  {
+    assert( !actvector.empty() );
+    // have to assumption on varheap?
+    if( actvector[0].second != 0 )
+      {
+		for( unsigned int i = 0; i != actvector.size(); ++i )
+		  {
+
+			actvector[i].second = 0;
+			assert( !m_assignment[actvector[i].first^1]);
+
+			if( isDC( actvector[i].first ) )
+			  {
+#ifdef DEBUG
+				std::cout << "delete: " << (actvector[i].first>>1) << " [" << assignedTo(actvector[i].first) << "]" << std::endl;
+#endif
+				actvector[i].first = 0; 
+			  }
+			else if( m_assignment[actvector[i].first] )
+			  { 
+#ifdef DEBUG
+				std::cout << "skip: " << (actvector[i].first>>1) << " [" << assignedTo(actvector[i].first) << "]" << std::endl;
+#endif
+			  }
+			else
+			  {
+#ifdef DEBUG
+				std::cout << "add " << (actvector[i].first>>1) << " [" << assignedTo(actvector[i].first) << "] to varorder" << std::endl;
+#endif
+				q_varOrder[0]->insert(actvector[i].first>>1); 
+			  }
+		  }
+		--q_decision;
+		return true;
+      }
+    else
+      {
+		//all decision are made. Check if we can delete some of the assumptions
+		for( unsigned int i = 0; i!= actvector.size(); ++i )
+		  {
+			unsigned int lit = actvector[i].first;
+			if(  lit == 0 )
+			  { continue; }
+#ifdef DEBUG
+			std::cout << "check: " << (lit>>1) << " [" << assignedTo(lit) << "] reason:" << q_reason[lit>>1] << std::endl;
+#endif
+								
+			assert( m_assignment[lit] || isDC(lit) );
+
+			if( isDC(lit) )
+			  {
+#ifdef DEBUG
+				std::cout << "delete " << (lit>>1) << std::endl;
+#endif
+				actvector[i].first = 0;
+			  }
+
+			// check, if we can lift "lit"
+			// if "lit" is implied or pure (and not dc), we can not remove it
+			if( isUnit(lit) || isPure(lit) )
+			  { continue; }
+
+			unsigned int bsize = m_binWatches[lit].size();
+			unsigned int b = 0;
+#ifdef DEBUG
+			std::cout << "check binaries" << std::endl;
+#endif
+
+			for( ; b != bsize; ++b )
+			  {
+				std::cout << getLit(m_binWatches[lit][b]) << " [" << assignedTo(m_binWatches[lit][b]) << "]" << std::endl;
+				if( !m_assignment[m_binWatches[lit][b]] )
+				  { break; }
+			  }
+			
+			if( b == bsize )
+			  {
+#ifdef DEBUG
+				std::cout << "check naries" << std::endl;
+#endif
+				unsigned int osize = q_occur[lit].size();
+				unsigned int c = 0;
+				for( ; c != osize; ++c )
+				  {
+					pointToClause* ptc = q_occur[lit][c];
+#ifdef DEBUG
+					printClause(ptc);
+#endif
+					assert( m_assignment[ptc->wl0]);
+					
+					if( ptc->wl0 != lit )
+					  { continue; }
+					else if( !m_assignment[ptc->wl1] )
+					  { 
+						unsigned int pos(0);
+						while ( ptc->clause()[pos] != 0 )
+						  {
+							if( ptc->clause()[pos] == lit )
+							  { ++pos; continue; }
+							if( m_assignment[ptc->clause()[pos]] && !isDC(ptc->clause()[pos]) )
+							  { break; }
+							++pos;
+						  }
+
+						if( ptc->clause()[pos] == 0 )
+						  { break; }
+					  }
+				  }
+				
+				// literal can be lifted
+				if(c == osize)
+				  {
+#ifdef DEBUG
+					std::cout << "delete " << (lit>>1) << std::endl;
+#endif
+					setDC(lit);
+					actvector[i].first = 0;
+				  }
+			  }
+		  }
+		backtrack(0);
+		return false;
+      }
+  }
+
+#if 0
+  // negate CNF with AIG
+  unsigned int Core::negateCNF( quantom::Quantom& myQuantom2 )
+  {
+#ifdef SOLDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+	aigpp::Manager aig;
+
+	std::vector< bool > varCreated(m_variables+1, false);
+	std::vector< aigpp::EdgeRef > varMap(m_variables+1);
+	std::vector< aigpp::EdgeRef > clauses;
+	clauses.reserve( m_clauses );
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		std::vector< unsigned int > binclause(2,0);
+		binclause[0] = v<<1;
+		for( unsigned int b = 0; b != m_binWatches[v<<1].size(); ++b)
+		  {
+			if( v < (m_binWatches[v<<1][b]>>1) )
+			  {
+				binclause[1] = Lit(m_binWatches[v<<1][b]);
+				aigpp::EdgeRef clause = createAIG( binclause, aig, varCreated, varMap );
+				clauses.push_back(clause);
+			  }
+		  }
+
+		binclause[0] = (v<<1)^1;
+		for( unsigned int b = 0; b != m_binWatches[(v<<1)^1].size(); ++b)
+		  {
+			if( v < (m_binWatches[(v<<1)^1][b]>>1) )
+			  {
+				binclause[1] = Lit(m_binWatches[(v<<1)^1][b]);
+				aigpp::EdgeRef clause = createAIG( binclause, aig, varCreated, varMap );
+				clauses.push_back(clause);
+			  }
+		  }
+	  }
+
+	for( unsigned int d = 0; d != m_clauseDatabase.size(); ++d )
+	  {
+		unsigned int* nclause = m_clauseDatabase[d]->clause();
+		unsigned int pos(0);
+		std::vector< unsigned int > dummyclause;
+		while( nclause[pos] != 0 )
+		  {
+			dummyclause.push_back(Lit(nclause[pos]));
+			++pos;
+		  }
+
+		aigpp::EdgeRef clause = createAIG( dummyclause, aig, varCreated, varMap );
+		clauses.push_back(clause);
+	  }
+
+	aigpp::EdgeRef formula = aigpp::multiAnd( aig, clauses );
+
+#ifdef SOLDEBUG
+	std::cout << formula << std::endl;
+#endif
+	if( formula.isConstant() )
+	  { 
+		if( structurallyFalse(formula) )
+		  { return 20; }
+		return 10; 
+	  }
+
+	std::map< unsigned int, aigpp::EdgeRef > mapping;
+
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		if( varMap[i].isValid() )
+		  { 
+			mapping[i] = varMap[i]; 
+			bool check = myQuantom2.setQVarLevel( i , 1 );
+			assert( check );
+		  }
+	  }
+
+	unsigned int rootliteral = 0;
+	unsigned int nextFreeIndex = m_variables+1;
+	std::vector< std::vector < unsigned int > > negatedformula = aig.createCNF( formula, mapping, rootliteral, nextFreeIndex );
+
+	//std::cout << "negated cnf: " << std::endl;
+
+	for( unsigned int f = m_variables+1; f != nextFreeIndex; ++f )
+	  {
+		bool check = myQuantom2.setQVarLevel( f , 1 );
+		assert( check );
+	  }
+	//std::cout << "p cnf " << (nextFreeIndex-1) << " " << negatedformula.size() << std::endl;
+	for( unsigned int i = 0; i != negatedformula.size(); ++i )
+	  {
+		/*
+		for( unsigned int j = 0; j != negatedformula[i].size(); ++j )
+		  {
+			std::cout << negatedformula[i][j] << " ";
+		  }
+		std::cout << "0" << std::endl;
+		*/
+		bool check = myQuantom2.addClause(negatedformula[i]);
+		assert( check );
+	  }
+
+	// Negation!
+	myQuantom2.addUnit( ((nextFreeIndex-1)<<1)^1 );
+	
+	return 0;
+  }
+
+  aigpp::EdgeRef Core::getAIGVar( unsigned int v, aigpp::Manager& aig, std::vector< bool >& varCreated, std::vector< aigpp::EdgeRef >& varMap )
+  {
+   
+    if( varCreated[v] )
+	  {
+        aigpp::EdgeRef result = varMap[ v ];
+        return result;
+	  }
+
+    std::cout << "c creating AIG variable (" << v << ")" << std::flush;
+     
+	aigpp::EdgeRef aigvar = aig.addVariable( lrabs::toString( v ) );
+
+	varMap[ v ] = aigvar;
+	varCreated[ v ] = true;        
+        
+    aigpp::EdgeRef result = varMap[ v ];
+   
+	std::cout << " done" << std::endl;
+
+    return result;
+  }
+
+  aigpp::EdgeRef Core::createAIG( const std::vector<unsigned int >& clause, aigpp::Manager& aig, std::vector< bool >& varCreated, std::vector< aigpp::EdgeRef >& varMap )
+  {
+    std::vector<aigpp::EdgeRef> literals;
+    literals.reserve( clause.size() );
+    
+    for( unsigned int lit = 0; lit != clause.size(); ++lit )
+	  {
+        literals.push_back( getAIGVar( clause[lit]>>1, aig, varCreated, varMap ).notIf( (clause[lit]&1) != 0 ) );
+	  }
+    
+    return aigpp::multiOr( aig, literals );
+  }
+
+  aigpp::EdgeRef
+  qbf::StructuredSolver_AIG::
+  createAIG( const std::vector<qbf::Clause>& clauses )
+  {
+    std::vector<int> poscount( _variables.size(), 0 );
+    std::vector<int> negcount( _variables.size(), 0 );
+
+    for( std::vector<qbf::Clause>::const_iterator c = clauses.begin(); c != clauses.end(); ++c )
+	  {
+        for( unsigned int i = 0; i != c->size(); ++i )
+		  {
+            if( isNegated( ( *c )[i] ) )
+			  {
+                ++negcount[var( ( *c )[i] )];
+			  }
+            else
+			  {
+                ++poscount[var( ( *c )[i] )];
+			  }
+		  }
+	  }
+
+    int bestvar = -1;
+    int bestval = -1;
+    
+    for( int i = 0; i != (int)_variables.size(); ++i )
+	  {
+        int val = poscount[i]*poscount[i] + negcount[i]*negcount[i];
+        if( val > bestval )
+		  {
+            bestval = val;
+            bestvar = i;
+		  }
+	  }
+
+    std::vector<aigpp::EdgeRef> posaig, negaig, noneaig;
+
+    for( std::vector<qbf::Clause>::const_iterator c = clauses.begin(); c != clauses.end(); ++c )
+	  {
+        int occ = 0;
+        std::vector<aigpp::EdgeRef> literals;
+        literals.reserve( c->size() );
+
+        for( unsigned int i = 0; i != c->size(); ++i )
+		  {
+            int cliti = c->_lits[i];
+            
+            if( cliti == lit( bestvar ) )
+			  {
+                occ = +1;
+			  }
+            else if( cliti == negate( lit( bestvar ) ) )
+			  {
+                occ = -1;
+			  }
+            else
+			  {
+                literals.push_back( getAIGVar( var( cliti ) ).notIf( isNegated( cliti ) ) );
+			  }
+		  }
+
+        aigpp::EdgeRef aig = aigpp::multiOr( _man, literals );
+
+        if( occ == -1 )
+		  {
+            negaig.push_back( aig );
+		  }
+        else if( occ == +1 )
+		  {
+            posaig.push_back( aig );
+		  }
+        else
+		  {
+            noneaig.push_back( aig );
+		  }
+	  }
+
+    aigpp::EdgeRef result = _man.getConst1();
+
+    if( !noneaig.empty() )
+	  {
+        result = result & aigpp::multiAnd( _man, noneaig );
+	  }
+
+    if( !posaig.empty() )
+	  {
+        result = result & ( getAIGVar( bestvar ) + aigpp::multiAnd( _man, posaig ) );
+	  }
+
+    if( !negaig.empty() )
+	  {
+        result = result & ( !getAIGVar( bestvar ) + aigpp::multiAnd( _man, negaig ) );
+	  }
+
+    return result;
+  }
+#endif
+}

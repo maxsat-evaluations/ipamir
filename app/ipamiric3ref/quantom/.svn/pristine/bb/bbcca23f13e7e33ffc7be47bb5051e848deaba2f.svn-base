@@ -1,0 +1,5 @@
+
+cd source/
+g++ main.o libquantom.a -fopenmp -static -ffloat-store -o quantom
+strip quantom
+cd ..

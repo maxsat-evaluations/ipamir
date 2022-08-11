@@ -1,0 +1,1340 @@
+#include "core.hpp"
+
+/* try to sort the lit lists of the different levels according to the usage in the last solution cube ... doesn't work at all */
+//#define SORTLIT
+
+namespace quantom {
+
+  bool Core::solution_analysis( void )
+  {
+#ifdef OUTPUT
+	std::cout << ".";
+#endif
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int pos(m_dsEndIndex-1);
+	
+	// fill solutioncube with complete decisionstack
+	while( pos > 0 )
+	  {
+		assert( m_decisionStack[pos] != 0 );
+
+#ifdef SOLDEBUG
+		std::cout << getLit( m_decisionStack[pos] ) << " is part of the solution (" << pos << ") - " << q_reason[Lit(m_decisionStack[pos])>>1] << std::endl;
+#endif
+		assert( q_solutioncube[ Lit(m_decisionStack[pos])>>1 ] == 0 );
+		q_solutioncube[ Lit(m_decisionStack[pos])>>1 ] = m_decisionStack[pos];
+		--pos;
+	  }
+	
+	unsigned int litsize = q_maxqlevel;
+
+	if( litsize < 3 ) 
+	  { return false; }
+
+
+	/* first check from inside out if we allowed to remove some universal literals from solutioncube */
+	do {
+	  litsize -= 2;
+
+	  // proceed all universal literals on qlevel "litsize"
+	  //for(std::set< unsigned int >::const_iterator it = q_litbylevel[litsize].begin(); it != q_litbylevel[litsize].end(); ++it )
+	  for(std::vector< unsigned int >::const_iterator it = q_litbylevel[litsize].begin(); it != q_litbylevel[litsize].end(); ++it )
+		{
+		  unsigned int lit = q_solutioncube[Lit(*it)>>1];
+
+#ifdef SOLDEBUG
+		  std::cout << "check: " << getLit(*it) << " " << getLit(lit) << std::endl;
+#endif
+
+		  // remove don't care and pure literals
+		  if( isPureOrDC(lit) || lit == 0)
+			{ 
+#ifdef SOLDEBUG
+			  std::cout << "delete " << getLit(lit) << " (" << q_reason[Lit(lit)>>1] << ") since it's pure/don't care" << std::endl;
+#endif
+			  q_solutioncube[ Lit(lit)>>1 ] = 0;
+			  continue;	
+			}
+
+		  assert( isUniversal(lit) );
+		  assert( m_assignment[Lit(lit)] );
+
+		  // check for all (original) clauses in which "lit" occurs if there is a literal which also satisfies the clause
+
+		  // First check binary clauses
+		  //unsigned int bsize = (unsigned int)m_binWatches[Lit(lit)].size();
+		  unsigned int bsize = m_binWatchesLearnedIndex[Lit(lit)];
+
+#ifdef SOLDEBUG
+		  std::cout << "check binary clauses" << std::endl;
+#endif
+
+		  unsigned int b = 0;
+
+		  for( ; b < bsize; ++b )
+			{
+#ifdef SOLDEBUG
+			  std::cout << "sec binclause: " << getLit( m_binWatches[Lit(lit)][b] ) << " [" << assignedTo(m_binWatches[Lit(lit)][b]) << "] solcube: " << q_solutioncube[ Lit(m_binWatches[Lit(lit)][b])>>1 ] << std::endl;
+#endif
+			  // if the second lit is not part of the solutioncube, we can't do anything with "lit"
+			  if( q_solutioncube[ m_binWatches[Lit(lit)][b]>>1 ] != m_binWatches[Lit(lit)][b] )
+				{ break; }
+			}
+
+#ifdef SOLDEBUG
+		  std::cout << "now check n-nary clauses" << std::endl;
+#endif
+		  if( b >= bsize )
+			{ 
+			  // At this point "lit" is potentially removable - check n-nary clauses
+
+			  unsigned int nsize = (unsigned int)q_occur[Lit(lit)].size();
+#ifdef EXDEBUG
+			  std::cout << "occursize: " << nsize << std::endl;
+#endif
+			  
+			  unsigned int n = 0;
+			  for( ; n < nsize; ++n )
+				{
+#ifdef SOLDEBUG
+				  printClause( q_occur[Lit(lit)][n] );
+#endif
+
+				  /* 
+					 Satisfies "wl0" the clause and is "wl0" part of the solutioncube? 
+					 By construction: if a existential literal satisfies the clause, "wl0" will so
+				  */
+				  if( q_solutioncube[ q_occur[Lit(lit)][n]->wl0>>1 ] != q_occur[Lit(lit)][n]->wl0 )
+					{ 
+#ifdef SOLDEBUG
+					  std::cout << "Is there another universal literal which satisfies the clause?" << std::endl;
+#endif
+
+					  // Now, look if some other universal literal satisfies the clause (and is part of the current solution cube )
+					  unsigned int pos(q_occur[Lit(lit)][n]->faq());
+					  unsigned int clauselit = q_occur[Lit(lit)][n]->clause()[pos];
+
+					  while ( clauselit != 0 )
+						{
+#ifdef EXDEBUG
+						  std::cout << getLit(clauselit) << " " << getLit(lit) << " " << getLit(q_solutioncube[Lit(clauselit)>>1]) << std::endl;
+#endif
+						  // Is there a literal which satisfies the clause? -> "lit" is potentially not part of the solutioncube
+						  if( clauselit != lit && q_solutioncube[Lit(clauselit)>>1] == clauselit && !isPureOrDC(clauselit) )
+							{ break; }
+						  clauselit = q_occur[Lit(lit)][n]->clause()[++pos];
+						}
+
+					  if( clauselit == 0 )
+						{ break; }
+					}
+				}
+
+			  //proceed all clauses? Then "lit" can be removed from solutioncube		  
+			  if( n >= nsize )
+				{
+#ifdef SOLDEBUG
+				  std::cout << "delete " << getLit(lit) << " from solutioncube" << std::endl;
+#endif
+				  q_solutioncube[ Lit(lit)>>1 ] = 0;
+				}
+			}
+		}
+
+	} while( litsize > 1 );
+
+	// Now we allowed to remove the existential literals from the innermost quantificationlevel
+
+	//for(std::set< unsigned int >::const_iterator it = q_litbylevel[q_maxqlevel-1].begin(); it != q_litbylevel[q_maxqlevel-1].end(); ++it )
+	for(std::vector< unsigned int >::const_reverse_iterator it = q_litbylevel[q_maxqlevel-1].rbegin(); it != q_litbylevel[q_maxqlevel-1].rend(); ++it )
+	  {
+		assert( !isUniversal(*it) );
+#ifdef SOLDEBUG
+		std::cout << "delete " << getLit(*it) << " from solution (innermost ex-quantor) " << std::endl;
+#endif
+		q_solutioncube[ (*it)>>1 ] = 0;
+	  }
+
+	std::vector< unsigned int > cube;
+	cube.reserve(m_dsEndIndex);
+
+	unsigned int maxulevel( 0 );
+
+	//clear solutioncube on the fly
+	for(unsigned int i = 1; i != q_solutioncube.size(); ++i)
+	  {
+		if( q_solutioncube[i] == 0 )
+		  { continue; }
+
+		if( m_level[i] == 0 )
+		  { 
+			// delete solutioncube stuff
+			q_solutioncube[i] = 0 ;
+			continue;
+		  }
+
+#ifdef SOLDEBUG
+		std::cout << getLit(q_solutioncube[i]) << " q: " << q_level[Lit(q_solutioncube[i])>>1];
+		std::cout << std::endl;
+#endif
+
+		if( isUniversal(q_solutioncube[i]) && q_level[Lit(q_solutioncube[i])>>1] > maxulevel )
+		  { maxulevel = q_level[Lit(q_solutioncube[i])>>1]; }
+
+		cube.push_back(q_solutioncube[i]^1);
+		// delete solutioncube stuff
+		q_solutioncube[i] = 0;
+	  }
+
+#ifdef SOLDEBUG
+	std::cout << std::endl;
+#endif
+
+	unsigned int size = (unsigned int)cube.size();
+
+	if( size == 1 )
+	  {
+	  EMPTYCUBE:
+#ifdef SOLDEBUG
+		std::cout << "emptycube" << std::endl;
+#endif
+		// Backtrack to decision level 0.
+		backtrack(0);
+		
+		// Add the literal as an implication to the decision stack.
+		addImplication(cube[0], NULL);
+
+
+#ifdef OUTPUT
+		std::cout << "Us";
+#else 
+#ifdef STATS
+		std::cout << "Us";
+#endif
+#endif
+		
+		q_newunit = true;
+
+		++m_ttlbd;
+
+		++q_solutions;
+		return true;
+	  }
+
+	// new copy learnt solution cube to solutionDatabase
+	unsigned int* cptr(new unsigned int[size+1]);
+	unsigned int usize = sortCubeUE( cube, size, maxulevel);
+
+	if( size == 1 )
+	  { goto EMPTYCUBE; }
+	if( usize == 0 )
+	  { 
+		++q_solutions;
+		return false; 
+	  }
+
+	unsigned int curmlevel( 0 );
+
+	for( unsigned int i = 0; i < size; ++i )
+	  {	
+		cptr[i] = cube[i]; 
+#ifdef SOLDEBUG
+		std::cout << getLit(cptr[i]) << " [" << assignedTo(cptr[i]) << "] ";
+#endif
+		if( isUniversal(cube[i]) && curmlevel < m_level[Lit(cptr[i])>>1] )
+		  { curmlevel = m_level[Lit(cptr[i])>>1]; }
+	  }
+
+	cptr[size] = 0;
+
+	return analyze(cptr, curmlevel);
+  }
+  
+  // solution analysis - more sophisticated algorithm for cube computation
+  // Return false iff all universal quantifiers are processed -> QBF is satisfiable
+  /* 
+	 First: every literal is part of the solution
+	 Second: check inside-out universal literals which can removed from solution since there are existential literals satisfying the clause or the literal is pure
+	 Third: check outside-in existential don't care literals if they can be assigned instead of universal literals
+  */
+
+#ifdef COMBSOLVER
+  bool Core::solution_analysis2( Implications impl )
+#else
+  bool Core::solution_analysis2()
+#endif
+  {
+#if 0
+	if( q_soltype == 1 )
+	  { return solution_analysis3( myQuantom2 ); }
+#endif
+#ifdef OUTPUT
+	std::cout << ".";
+#endif
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	if( q_decision == 0 )
+	  { 
+		++q_solutions;
+		return false; 
+	  }
+
+	/* add pseudo implications from aigsolve to improve solution */
+#ifdef COMBSOLVER
+	
+	for( std::vector< std::pair<unsigned int, unsigned int> >::const_iterator it = impl.units.begin(); it != impl.units.end(); ++it )
+	  {
+#ifdef EXPORTDEBUG
+		std::cout << "pseudo unit: " << getLit(it->first) << std::endl;
+#endif
+
+		assert( !m_assignment[Lit(it->first)^1]);
+		if( m_assignment[Lit(it->first)] )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "already assigned" << std::endl;
+#endif
+			continue;
+		  }
+		
+		std::map<unsigned int, unsigned int>::const_iterator bit = impl.binimpl.find(it->first);
+		if( bit != impl.binimpl.end() )
+		  {
+#ifdef EXPORTDEBUG
+			std::cout << "add pseudo bin implication: " << getLit(it->first) << " [" << assignedTo(it->first) << "] " << getLit(bit->second) << " [" << assignedTo(bit->second) << "] for dllevel: " << impl.backtracklevel << std::endl;
+#endif
+			setLearnedUnit(it->first);
+			addBinImplication(it->first, bit->second);
+			if( deduce() != NULL )
+			  { assert(false); }
+		  }
+		else 
+		  {
+			std::map<unsigned int, pointToClause*>::const_iterator cit = impl.naryimpl.find(it->first);
+			if( cit != impl.naryimpl.end() )
+			  {
+#ifdef EXPORTDEBUG
+				std::cout << "add pseudo implication: ";
+				printClause(cit->second);
+				std::cout << " for dllevel: " << impl.backtracklevel << std::endl;
+#endif
+				setLearnedUnit(it->first);
+				addImplication(it->first, cit->second->clause());
+				if( deduce() != NULL )
+				  { assert(false); }
+			  }
+			else
+			  {
+#ifdef EXPORTDEBUG
+				std::cout << "add pseudo unit clause: " << getLit(it->first) << " [" << assignedTo(it->first) << "] for dllevel: " << impl.backtracklevel << std::endl;
+#endif
+				setLearnedUnit(it->first);
+				addImplication(it->first, NULL );
+				if( deduce() != NULL )
+				  { assert(false); }
+			  }
+		  }
+	  }
+
+	/* add further pseudo implications learned by aigsolve preprocessor to improve solution */ 
+
+	for( unsigned int ps = 0; ps != impl.pseudoimpl.size(); ++ps )
+	  {
+
+#ifdef EXPORTDEBUG
+		std::cout << "next pseudolit: " << getLit(impl.pseudoimpl[ps]) << std::endl;
+#endif
+
+		if( m_assignment[impl.pseudoimpl[ps] ] || isDC(impl.pseudoimpl[ps]) )
+		  { continue; }
+
+		if( m_assignment[impl.pseudoimpl[ps]^1] )
+		  {
+			assert( isPure(impl.pseudoimpl[ps]) );
+
+#ifdef EXPORTDEBUG
+			std::cout << "further pseudo implication leads to dc lit" << std::endl;
+#endif
+			setDC(impl.pseudoimpl[ps]);
+			addImplication(getUniFlag(impl.pseudoimpl[ps])^1, NULL );
+			continue;
+		  }
+
+#ifdef EXPORTDEBUG
+		std::cout << "add further pseudo lit: " << getLit(impl.pseudoimpl[ps]) << " [" << assignedTo(impl.pseudoimpl[ps]) << "]" << std::endl;
+#endif
+		setLearnedUnit(impl.pseudoimpl[ps]);
+		addImplication(getUniFlag(impl.pseudoimpl[ps]), NULL );
+		if( deduce() != NULL )
+		  { assert(false); }
+	  }
+
+#endif
+
+	unsigned int pos(m_dsEndIndex-1);
+	unsigned int maxunilit(0);
+	unsigned int resunilit(0);
+
+#ifdef DEBUG
+#ifndef COMBSOLVER
+	if( q_liftingmode == 0 )
+	  { checkSolution(); }
+#endif
+#endif
+
+	// clear solutioncube
+	for(unsigned int i = 1; i <= m_variables; ++i)
+	  {
+		q_solutioncube[i] = 0;
+	  }
+
+	// fill solutioncube with complete decisionstack
+	while( pos > 0 )
+	  {
+		assert( m_decisionStack[pos] != 0 );
+#ifdef SOLDEBUG
+		std::cout << getLit( m_decisionStack[pos] ) << (isUniversal(m_decisionStack[pos])?"(a)":"(e)")<< " (" << pos << ") " << q_reason[Lit(m_decisionStack[pos])>>1];
+#endif
+
+		if(isUniversal(m_decisionStack[pos]) )
+		  { ++maxunilit; }
+		/* skip don't care existential literals and pure/dc universal literals */
+		if( isEDC(m_decisionStack[pos]) || isUPureOrDC(m_decisionStack[pos]) )
+		  { 
+#ifdef SOLDEBUG
+			std::cout << " skip" << std::endl;
+#endif
+			--pos;
+			continue; 
+		  }
+
+		assert( q_solutioncube[ Lit(m_decisionStack[pos])>>1 ] == 0 );
+
+#ifdef SOLDEBUG
+		std::cout << " is part of the solution" << std::endl;
+#endif
+		q_solutioncube[ Lit(m_decisionStack[pos])>>1 ] = m_decisionStack[pos];
+
+		--pos;
+	  }
+
+	unsigned int litsize = q_maxqlevel;
+
+#ifdef SOLDEBUG
+	std::cout << "litsize: " << litsize << std::endl;
+#endif
+
+	if( litsize < 2 && q_liftingmode != 2 ) 
+	  {
+		++q_solutions;
+		return false; 
+	  }
+
+	std::vector<unsigned int> globalDC; 
+	std::vector<unsigned int> removefromsol;
+
+	if( q_liftingmode != 2 )
+	  {
+		/* first check from inside out if we allowed to remove some universal literals from solutioncube */
+		do {
+		  litsize -= 2;
+
+#ifdef SOLDEBUG
+		  std::cout << "level: " << litsize << std::endl;
+#endif
+
+		  if( q_litbylevel[litsize].empty() )
+			{ continue; }
+
+		  /* reorder litbylevel by usage in solution cube */
+#ifdef SORTLIT
+		  std::vector< unsigned int > nlitlevel;
+		  unsigned int first(0);
+		  unsigned int last(q_litbylevel[litsize].size()-1);
+		  nlitlevel.reserve( q_litbylevel[litsize].size() );
+#endif
+
+		  // proceed all universal literals on qlevel "litsize"
+		  for(std::vector< unsigned int >::const_iterator it = q_litbylevel[litsize].begin(); it != q_litbylevel[litsize].end(); ++it )
+			{
+			  unsigned int lit = q_solutioncube[Lit(*it)>>1];
+
+			  std::vector<unsigned int> DCcandidates;
+
+#ifdef SOLDEBUG
+			  std::cout << "check: " << getLit(*it) << " " << getLit(lit) << " [" << assignedTo(lit) << "]" << std::endl;
+#endif
+		  
+			  if(m_level[Lit(*it)>>1] == 0 )
+				{
+#ifdef SORTLIT
+				  //q_solutioncube[Lit(*it)>>1] = 0;
+				  --last;
+#endif
+				  continue;
+				}
+
+			  // skip don't care and pure literals
+			  if( lit == 0 )
+				{ 
+#ifdef SOLDEBUG
+				  std::cout << "skip " << getLit(*it) << " (" << std::hex << q_reason[Lit(*it)>>1] << std::dec << ") since it's pure/don't care/not part of the solution" << std::endl;
+#endif
+#ifdef SORTLIT
+				  nlitlevel[first++] = lit;
+#endif
+				  continue;	
+				}
+
+			  assert( isUniversal(lit) && m_assignment[Lit(lit)] );
+
+			  // check for all (original) clauses in which "lit" occurs if there is a literal which also satisfies the clause
+
+			  // First check binary clauses
+			  //unsigned int bsize = (unsigned int)m_binWatches[Lit(lit)].size();
+			  unsigned int bsize = m_binWatchesLearnedIndex[Lit(lit)];
+
+#ifdef SOLDEBUG
+			  std::cout << "check binary clauses" << std::endl;
+#endif
+
+			  unsigned int b = 0;
+
+			  for( ; b < bsize; ++b )
+				{
+#ifdef SOLDEBUG
+				  std::cout << "sec binclause: " << getLit( m_binWatches[Lit(lit)][b] ) << " [" << assignedTo(m_binWatches[Lit(lit)][b]) << "] solcube: " << q_solutioncube[ Lit(m_binWatches[Lit(lit)][b])>>1 ] << std::endl;
+#endif
+
+				  // Do we have an existential DC lit? Then we can possibe use it to hide the universal literal in the solution
+				  if( isEDC(m_binWatches[Lit(lit)][b]) )
+					{
+#ifdef SOLDEBUG
+					  std::cout << "is DC "<< std::endl;
+#endif
+					  if( safeToMarkDC( m_binWatches[Lit(lit)][b]^1) )
+						{
+#ifdef SOLDEBUG
+						  std::cout << "push to DC list: " << std::endl;
+#endif
+						  DCcandidates.push_back(m_binWatches[Lit(lit)][b]);
+						  globalDC.push_back(m_binWatches[Lit(lit)][b]);
+						  // mark literal is pure now...
+						  setPure(m_binWatches[Lit(lit)][b]);
+						  // Since it has to be satisfied in the binary clause, set literal temporary to true
+						  q_solutioncube[ m_binWatches[Lit(lit)][b]>>1 ] = m_binWatches[Lit(lit)][b];
+						}
+					  else
+						{ break; }
+					}
+				  // if the second lit is not part of the solutioncube, we can't do anything with "lit"
+				  else if( q_solutioncube[ m_binWatches[Lit(lit)][b]>>1 ] != m_binWatches[Lit(lit)][b] )
+					{ break; }
+				}
+#ifdef SOLDEBUG
+			  std::cout << "now check n-nary clauses" << std::endl;
+#endif
+			  if( b >= bsize )
+				{ 
+				  // At this point "lit" is potentially removable - check n-nary clauses
+
+				  unsigned int nsize = (unsigned int)q_occur[Lit(lit)].size();
+#ifdef EXDEBUG
+				  std::cout << "occursize: " << nsize << std::endl;
+#endif
+			  
+				  unsigned int n = 0;
+				  for( ; n < nsize; ++n )
+					{
+#ifdef SOLDEBUG
+					  printClause( q_occur[Lit(lit)][n] );
+#endif
+
+					  /* 
+						 Do "wl0" satisfies the clause and is "wl0" part of the solutioncube? 
+						 By construction: if an existential literal satisfies the clause, "wl0" will so
+					  */
+					  unsigned int wl0 = q_occur[Lit(lit)][n]->wl0;
+#ifdef EXDEBUG
+					  std::cout << "wl0: " << getLit(wl0) << " cube[wl0]: " << getLit(q_solutioncube[wl0>>1]) << " mlevel: " << m_level[wl0>>1] << std::endl;
+#endif
+					  if( q_solutioncube[ wl0>>1 ] != wl0 )
+						{ 
+#ifdef SOLDEBUG
+						  std::cout << "Is there DC-Lit which can satisfy the clause?" << std::endl;
+#endif
+						  unsigned int pos(0);
+						  unsigned int faq( q_occur[Lit(lit)][n]->faq() );
+						  unsigned int clauselit = q_occur[Lit(lit)][n]->clause()[pos];
+						  unsigned int dccounter = 0;
+
+						  while( pos < faq )
+							{
+#ifdef EXDEBUG
+							  std::cout << getLit(clauselit) << (isUniversal(clauselit)?" (a) ":" (e) ") << q_reason[Lit(clauselit)>>1] << std::endl;
+#endif
+
+							  if( isDC(clauselit) )
+								{
+#ifdef SOLDEBUG
+								  std::cout << getLit(clauselit) << " is DC" << std::endl;
+#endif
+								  DCcandidates.push_back(clauselit);
+								  ++dccounter;
+								}
+							  else if( q_solutioncube[Lit(clauselit)>>1] == clauselit )
+								{
+#ifdef SOLDEBUG
+								  std::cout << getLit(clauselit) << " was already satisfied" << std::endl;
+#endif	  
+								  /* clear collected dccandidates */
+								  while( dccounter-- != 0 )
+									{ DCcandidates.pop_back(); }
+								  dccounter = 0;
+								  break;
+								}
+						 
+							  clauselit = q_occur[Lit(lit)][n]->clause()[++pos];
+							}
+
+						  if( dccounter == 1 )
+							{
+#ifdef SOLDEBUG
+							  std::cout << "only one DC-lit " << getLit(*DCcandidates.rbegin()) << std::endl;
+#endif
+
+							  if(safeToMarkDC(*DCcandidates.rbegin()^1) )
+								{
+#ifdef SOLDEBUG
+								  std::cout << "in clause -> satisfy this literal temporary" << std::endl;
+#endif
+								  // mark literal is pure now...
+								  setPure(*DCcandidates.rbegin());
+								  globalDC.push_back(*DCcandidates.rbegin());
+								  // Since it is the only existential literal in the clause which would satisfy the clause, set literal temporary to true
+								  q_solutioncube[ *DCcandidates.rbegin()>>1 ] = *DCcandidates.rbegin();
+								}
+							  else
+								{ break; }
+							}
+						  /* avoid the detection of universals if there exists a dc existential lit */
+						  else if( dccounter == 0 && pos == faq)
+							{
+#ifdef SOLDEBUG
+							  std::cout << "Is there another universal literal which satisfies the clause?" << std::endl;
+#endif
+
+							  // Now, look if some other universal literal satisfies the clause (and is part of the current solution cube )
+							  while ( clauselit != 0 )
+								{
+#ifdef SOLDEBUG
+								  std::cout << getLit(clauselit) << " " << getLit(lit) << " " << getLit(q_solutioncube[Lit(clauselit)>>1]) << " reason: " << q_reason[Lit(clauselit)>>1] << std::endl;
+#endif
+								  // Is there a literal which satisfies the clause? -> "lit" is potentially not part of the solutioncube
+								  if( clauselit != lit && q_solutioncube[Lit(clauselit)>>1] == clauselit && !isPureOrDC(clauselit) ) 
+									{ break; }
+								  clauselit = q_occur[Lit(lit)][n]->clause()[++pos];
+								}
+
+							  if( clauselit == 0 )
+								{ break; }
+							}
+						}
+					}
+
+				  //proceed all clauses? Then "lit" can be removed from solutioncube		  
+				  if( n >= nsize )
+					{
+
+					  /* fix pure markes */
+					  for(std::vector<unsigned int>::const_iterator cit = DCcandidates.begin(); cit != DCcandidates.end(); ++cit )
+						{
+#ifdef SOLDEBUG
+						  std::cout << "DCcandidate: " << getLit(*cit) << " reason: " << q_reason[*cit>>1] << std::endl;
+#endif
+						  /* if threre still dc-literals in open, it is to expensive to determine the correct assignment for these 
+							 -> lit can not be removed from solution cube */
+						  if( isDC(*cit) )
+							{
+#ifdef SOLDEBUG
+							  std::cout << "still DC lits in list -> quit detection for " << getLit(lit) << std::endl;
+#endif
+							  goto RESETMARKERS; 					  
+							}
+						}
+
+#ifdef SOLDEBUG
+					  std::cout << "delete " << getLit(lit) << " from solutioncube" << std::endl;
+#endif
+					  q_solutioncube[ Lit(lit)>>1 ] = 0;
+#ifdef SORTLIT
+					  nlitlevel[first++] = *it;
+#endif
+					}
+				  else
+					{ goto RESETMARKERS; }
+				}
+			  else
+				{
+				RESETMARKERS:
+#ifdef SORTLIT
+				  nlitlevel[last--] = *it;
+#endif
+				  // reset the pure - markers
+				  for(std::vector<unsigned int>::const_iterator it = DCcandidates.begin(); it != DCcandidates.end(); ++it)
+					{ 
+					  setDC(*it); 
+					  q_solutioncube[Lit(*it)>>1] = 0;
+					}
+				}
+			}
+	  
+#ifdef SORTLIT
+		  assert( first == (last+1) );
+		  q_litbylevel[litsize] = nlitlevel;
+#endif
+
+		} while( litsize > 1 );
+	  }
+
+	/* now check which existential dc literal has to be part of the solution and which existential literal can be removed */
+	litsize = 0;
+	unsigned int maxlevel = q_decision-1;
+#ifdef SOLDEBUG
+	std::cout << "look at existential literals:" << std::endl;
+	std::cout << "maxlevel: " << maxlevel << std::endl;
+#endif
+	do {
+
+#ifdef SOLDEBUG
+	  std::cout << "level: " << litsize << std::endl;
+#endif
+
+	  if( q_litbylevel[litsize].empty() )
+		{ 
+		  litsize += 2;
+		  continue; 
+		}
+
+#ifdef SORTLIT
+	  /* reorder litbylevel by usage in solution cube */
+	  std::vector< unsigned int > nlitlevel;
+	  unsigned int first(0);
+	  unsigned int last(q_litbylevel[litsize].size()-1);
+	  nlitlevel.reserve( q_litbylevel[litsize].size() );
+#endif
+
+	  for( std::vector< unsigned int >::const_iterator it = q_litbylevel[litsize].begin(); it != q_litbylevel[litsize].end(); ++it )
+		{
+		  unsigned int lit = *it;
+#ifdef SOLDEBUG
+		  std::cout << "check " << getLit(lit) << " sol: " << getLit(q_solutioncube[lit>>1]) << " reason: " << q_reason[lit>>1] << std::endl;
+#endif
+		  assert(!isUniversal(lit) );
+
+		  if( m_level[lit>>1] == 0 )
+			{
+#ifdef SORTLIT
+			  q_solutioncube[lit>>1] = 0;
+			  --last;
+#endif
+			  continue;
+			}
+
+		  if( isOrgUnit( lit ) )
+			{
+			  assert( q_solutioncube[lit>>1] != 0 );
+#ifdef SORTLIT
+			  nlitlevel[last--] = lit;
+#endif
+			  continue;
+			}
+
+		  if( q_solutioncube[lit>>1] != 0 )
+			{
+#ifdef SOLDEBUG
+			  std::cout << "allow to remove " << getLit(lit) << " from solution?" << std::endl
+						<< "check binary: " << std::endl;
+#endif
+			  unsigned int slit = q_solutioncube[lit>>1];
+
+			  //unsigned int size = (unsigned int)m_binWatches[slit].size();
+			  unsigned int size = m_binWatchesLearnedIndex[slit];
+			  unsigned int b(0);
+			  for(; b < size; ++b )
+				{
+				  unsigned int blit = m_binWatches[slit][b];
+#ifdef SOLDEBUG
+				  std::cout << "blit: " << getLit(blit) << " [" << assignedTo(blit) << "] sol:" << getLit(q_solutioncube[Lit(blit)>>1]) << " reason: " << q_reason[Lit(blit)>>1] << std::endl;
+#endif
+				  if( q_solutioncube[Lit(blit)>>1] != blit )
+					{ break; }
+				}
+
+			  if( b < size )
+				{ 
+#ifdef SORTLIT
+				  nlitlevel[first++] = lit;
+#endif
+				  continue; 
+				}
+
+#ifdef SOLDEBUG
+			  std::cout << "check nary: " << std::endl;
+#endif
+
+			  size = (unsigned int)q_occur[slit].size();
+			  b = 0;
+			  for(; b < size; ++b )
+				{
+				  pointToClause* clause = q_occur[slit][b];
+#ifdef SOLDEBUG
+				  printClause(clause);
+				  std::cout << "wl0: " << getLit(clause->wl0) << " sol: " << getLit(q_solutioncube[clause->wl0>>1]) << std::endl
+							<< "wl1: " << getLit(clause->wl1) << " sol: " << getLit(q_solutioncube[clause->wl1>>1]) << std::endl 
+							<< "wla: " << getLit(clause->wla) << " sol: " << getLit(q_solutioncube[Lit(clause->wla)>>1]) << std::endl;
+#endif
+
+				  if( clause->wl1 == 0 && clause->wla != 0 && q_solutioncube[Lit(clause->wla)>>1] != clause->wla )
+					{
+					  assert( clause->wl0 == slit );
+					  break;
+					}
+
+				  if( ( clause->wl0 != slit && q_solutioncube[clause->wl0>>1] == clause->wl0 ) ||
+					  ( clause->wl1 != 0 && clause->wl1 != slit && q_solutioncube[clause->wl1>>1] == clause->wl1 ) ||
+					  ( clause->wla != 0 && q_solutioncube[Lit(clause->wla)>>1] == clause->wla ) )
+					{ continue; }
+				  
+#ifdef SOLDEBUG
+				  std::cout << "search for another lit" << std::endl;
+#endif
+				  
+				  unsigned int pos(0);
+				  unsigned int clit = clause->clause()[pos];
+				  while( clit != 0 )
+					{
+					  if( q_solutioncube[Lit(clit)>>1] == clit && slit != clit )
+						{ break; }
+					  clit = clause->clause()[++pos];
+					}
+				  
+				  if( clit == 0 )
+					{ break; }
+
+				}
+
+			  if( b == size )
+				{
+#ifdef SOLDEBUG
+				  std::cout << "safe to remove " << getLit(slit) << " from solution" << std::endl;
+#endif
+				  q_solutioncube[lit>>1] = 0;
+#ifdef SORTLIT
+				  nlitlevel[last--] = lit;
+#endif
+				}
+			  else
+				{
+#ifdef SORTLIT
+				  nlitlevel[first++] = lit;
+#endif
+				}
+			}
+		  else
+			{
+#ifdef SORTLIT
+			  nlitlevel[last--] = lit;
+#endif
+			}
+		}
+
+#ifdef SORTLIT
+	  assert( first == (last+1) );
+	  q_litbylevel[litsize] = nlitlevel;
+#endif
+
+	  litsize += 2;
+	} while( litsize < maxlevel );
+
+	/* reset globally pure markers */
+	for(std::vector<unsigned int>::const_iterator git = globalDC.begin(); git != globalDC.end(); ++git )
+	  {	
+		setDC(*git); 
+		q_solutioncube[Lit(*git)>>1] = 0;
+	  }
+
+	// Now we allowed to remove the existential literals from the innermost quantificationlevel
+	for(std::vector< unsigned int >::const_iterator it = q_litbylevel[q_maxqlevel-1].begin(); it != q_litbylevel[q_maxqlevel-1].end(); ++it )
+	  {
+		assert( !isUniversal(*it) );
+#ifdef SOLDEBUG
+		std::cout << "delete " << getLit(*it) << " from solution (innermost ex-quantor) " << std::endl;
+#endif
+		q_solutioncube[ (*it)>>1 ] = 0;
+	  }
+
+	std::vector< unsigned int > cube;
+	cube.reserve(m_dsEndIndex);
+
+	unsigned int maxulevel( 0 );
+
+	//clear solutioncube on the fly
+	for(unsigned int i = 1; i != q_solutioncube.size(); ++i)
+	  {
+		if( q_solutioncube[i] == 0 )
+		  { continue; }
+
+		if( m_level[i] == 0 )
+		  { 
+			// delete solutioncube stuff
+			//q_solutioncube[i] = 0 ;
+			continue;
+		  }
+
+#ifdef SOLDEBUG
+		std::cout << getLit(q_solutioncube[i]) << " q: " << q_level[Lit(q_solutioncube[i])>>1];
+		std::cout << std::endl;
+#endif
+
+		if( isUniversal(q_solutioncube[i]) && q_level[Lit(q_solutioncube[i])>>1] > maxulevel )
+		  { maxulevel = q_level[Lit(q_solutioncube[i])>>1]; }
+
+		cube.push_back(q_solutioncube[i]^1);
+		// delete solutioncube stuff
+		//q_solutioncube[i] = 0;
+	  }
+
+#ifdef SOLDEBUG
+	std::cout << std::endl;
+#endif
+
+	unsigned int size = (unsigned int)cube.size();
+
+	if( size == 1 )
+	  {
+	  EMPTYCUBE:
+#ifdef SOLDEBUG
+		std::cout << "emptycube" << std::endl;
+#endif
+		++q_solutions;
+
+		if( !isUniversal(cube[0]) )
+		  { return false; }
+		// Backtrack to decision level 0
+		backtrack(0);
+		
+		setUnit(cube[0]);
+
+		// Add the literal as an implication to the decision stack.
+		addImplication(cube[0], NULL);
+		
+		return true;
+	  }
+
+	// new copy learned solution cube to solutionDatabase
+	unsigned int usize = sortCubeUE( cube, size, maxulevel);
+
+	if( size == 1 )
+	  { 
+		goto EMPTYCUBE; }
+	if( usize == 0 )
+	  { 
+		++q_solutions;
+		return false; 
+	  }
+
+	unsigned int* cptr(new unsigned int[size+1]);
+	unsigned int curmlevel( 0 );
+
+	for( unsigned int i = 0; i < size; ++i )
+	  {	
+		cptr[i] = cube[i]; 
+#ifdef SOLDEBUG
+		std::cout << getLit(cptr[i]) << " [" << assignedTo(cptr[i]) << "] ";
+#endif
+		if( i < usize )
+		  { 
+			++resunilit;
+			if( curmlevel < m_level[Lit(cptr[i])>>1] )
+			  { curmlevel = m_level[Lit(cptr[i])>>1]; }
+		  }
+	  }
+
+#ifdef SOLDEBUG
+	std::cout << " (" << size << ")" << std::endl;
+#endif
+	//std::cout << (maxunilit-resunilit);
+
+	cptr[size] = 0;
+
+	bool result = analyze(cptr, curmlevel);
+	delete[] cptr;
+
+	return result;
+  }
+	
+  bool Core::safeToMarkDC(unsigned int dclit) const
+  {
+#ifdef SOLDEBUG
+	std::cout << __func__ << " " << getLit(dclit) << std::endl
+			  << "check bin dc: " << std::endl;
+#endif
+
+	//unsigned int size = (unsigned int)m_binWatches[dclit].size();
+	unsigned int size = m_binWatchesLearnedIndex[dclit];
+  
+	for( unsigned int b = 0 ; b < size; ++b )
+	  {
+		unsigned int blit = m_binWatches[dclit][b];
+#ifdef SOLDEBUG
+		std::cout << getLit(blit) << " sol:" << getLit(q_solutioncube[Lit(blit)>>1]) << " reason: " << q_reason[Lit(blit)>>1] << std::endl;
+#endif
+
+		/* literal not part of the solution? Then it would be unsafe to mark "dclit" */
+		if( q_solutioncube[Lit(blit)>>1] != blit )
+		  { return false; }
+	  }
+  
+	size = (unsigned int)q_occur[dclit].size();
+
+#ifdef SOLDEBUG
+	std::cout << "check nary for dc: " << std::endl;
+#endif
+
+	for( unsigned int i = 0; i < size; ++i )
+	  {
+		pointToClause* clause = q_occur[dclit][i];
+
+#ifdef SOLDEBUG
+		printClause(clause);
+#endif
+	  	  
+		if( q_solutioncube[ clause->wl0>>1 ] != clause->wl0 || ( clause->wl1 != 0 && q_solutioncube[ clause->wl1>>1 ] != clause->wl1 ) )
+		  {
+#ifdef SOLDEBUG
+			std::cout << "ex watches don't satisfy the clause" << std::endl;
+#endif
+			unsigned int pos(0);
+			unsigned int clit = clause->clause()[pos];
+			while( pos < clause->faq() )
+			  {
+#ifdef SOLDEBUG
+				std::cout << getLit(clit) << " sol: " << getLit(q_solutioncube[clit>>1]) << std::endl;
+#endif
+				/* literal part of the solution? Then it would be safe to mark "dclit" */
+				if( q_solutioncube[clit>>1] == clit )
+				  { break; }
+				clit = clause->clause()[++pos];
+			  }
+
+			if( pos == clause->faq() )
+			  { return false; }
+		  }
+	  }
+	return true;
+  }
+
+  void Core::checkSolution( void )
+  {
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		if( !(m_assignment[v<<1] || m_assignment[(v<<1)^1] || q_deleted[v] || q_level[v] == 0) )
+		  {
+			std::cout << v << " " << assignedTo(v<<1) << " " << q_deleted[v] << " " << q_level[v] << std::endl;
+		  }
+		assert( m_assignment[v<<1] || m_assignment[(v<<1)^1] || q_deleted[v] || q_level[v] == 0 );
+		if( q_deleted[v] || q_level[v] == 0 )
+		  { continue; }
+
+		if( !m_assignment[v<<1] )
+		  {
+			unsigned bsize = m_binWatchesLearnedIndex[v<<1];
+			assert(bsize <= m_binWatches[v<<1].size()); 
+			for( unsigned int b = 0; b != bsize; ++b )
+			  { assert( m_assignment[Lit(m_binWatches[v<<1][b])] ); }
+		  }
+
+		if( !m_assignment[(v<<1)^1] )
+		  {
+			unsigned bsize = m_binWatchesLearnedIndex[(v<<1)^1];
+			assert(bsize <= m_binWatches[(v<<1)^1].size()); 
+			for( unsigned int b = 0; b != bsize; ++b )
+			  { assert( m_assignment[Lit(m_binWatches[(v<<1)^1][b])] ); }
+		  }
+	  }
+
+	for( unsigned int d = 0; d != m_clauseDatabase.size(); ++d )
+	  {
+		assert( m_clauseDatabase[d] != NULL );
+		assert( m_clauseDatabase[d]->clause() != NULL );
+		assert( m_clauseDatabase[d]->clause()[0] != 0 );
+
+		if( m_clauseDatabase[d]->lbd() != 1 )
+		  { continue; }
+
+		unsigned int* clause = m_clauseDatabase[d]->clause();
+
+		unsigned int pos(0);
+		while( clause[pos] != 0 )
+		  {
+			if( m_assignment[Lit(clause[pos])] )
+			  { break; }
+			++pos;
+		  }
+
+		assert( clause[pos] != 0 );
+	  }
+  }
+
+#if 0
+  // lifting based solution analysis
+  bool Core::solution_analysis3( quantom::Quantom& myQuantom2 )  
+  {
+#ifdef OUTPUT
+	std::cout << ".";
+#endif
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+	printdatabase();
+#endif
+
+	if( q_decision == 0 )
+	  { 
+		++q_solutions;
+		return false; 
+	  }
+
+	unsigned int pos(m_dsEndIndex-1);
+	unsigned int maxunilit(0);
+	unsigned int resunilit(0);
+
+	std::vector< unsigned int > assumptions;
+	assumptions.reserve( m_variables );
+
+	// clear solutioncube
+	for(unsigned int i = 0; i != q_solutioncube.size(); ++i)
+	  { q_solutioncube[i] = 0; }
+
+	bool receivedconflict(false);
+	// fill solutioncube with complete decisionstack
+	while( pos > 0 )
+	  {
+		assert( m_decisionStack[pos] != 0 );
+#ifdef SOLDEBUG
+		std::cout << getLit( m_decisionStack[pos] ) << (isUniversal(m_decisionStack[pos])?"(a)":"(e)")<< " (" << pos << ") " << q_reason[Lit(m_decisionStack[pos])>>1];
+#endif
+
+		if(isUniversal(m_decisionStack[pos]) )
+		  { ++maxunilit; }
+		/* skip don't care existential literals and pure/dc universal literals */
+		/*
+		if( isEDC(m_decisionStack[pos]) || isUPureOrDC(m_decisionStack[pos]) )
+		  { 
+#ifdef SOLDEBUG
+			std::cout << " skip" << std::endl;
+#endif
+			--pos;
+			continue; 
+		  }
+		*/
+
+		assert( q_solutioncube[ Lit(m_decisionStack[pos])>>1 ] == 0 );
+
+#ifdef SOLDEBUG
+		std::cout << " is part of the solution" << std::endl;
+#endif
+
+		if( m_level[Lit(m_decisionStack[pos])>>1] != 0 )
+		  { 
+#ifdef SOLDEBUG
+			std::cout << "qmaxlevel: " << q_maxqlevel << " qlevel: " << q_level[Lit(m_decisionStack[pos])>>1] << std::endl;
+#endif
+			if( !isUniversal(m_decisionStack[pos]) )
+			  {
+#ifdef SOLDEBUG
+				std::cout << "ex" << std::endl;
+#endif
+				myQuantom2.setActivity((Lit(m_decisionStack[pos])>>1), (double)q_maxqlevel*((double)q_maxqlevel/(double)q_level[Lit(m_decisionStack[pos])>>1] ) );
+			  }
+			else 
+			  {
+#ifdef SOLDEBUG
+				std::cout << "all" << std::endl;
+#endif
+				myQuantom2.setActivity((Lit(m_decisionStack[pos])>>1), (double)q_level[Lit(m_decisionStack[pos])>>1] );
+			  }
+
+			assumptions.push_back( Lit(m_decisionStack[pos]) ); 
+#ifdef SOLDEBUG
+			std::cout << "add assumption " << getLit(m_decisionStack[pos]) << std::endl;
+#endif
+		  }
+		else
+		  {	
+			if( !myQuantom2.addUnit( Lit(m_decisionStack[pos]) ) )
+			  {
+				receivedconflict = true; 
+#ifdef SOLDEBUG
+				std::cout << "RECEIVED CONFLICT" << std::endl; 
+#endif
+			  }
+		  }
+
+		--pos;
+	  }
+
+	unsigned int litsize = q_maxqlevel;
+
+#ifdef SOLDEBUG
+	std::cout << "litsize: " << litsize << std::endl;
+#endif
+
+	if( litsize < 2 && q_liftingmode != 2 ) 
+	  {
+		++q_solutions;
+		return false; 
+	  }
+
+	std::vector< unsigned int > cube;
+	if( !receivedconflict )
+	  {
+		cube = myQuantom2.solveLifting( assumptions,1 );
+	  }
+#ifdef SOLDEBUG
+	std::cout << "lifted cube: " << std::endl;
+	printClause(cube);
+#endif
+
+	unsigned int maxulevel( 0 );
+
+
+	for(unsigned int i = 0; i != cube.size(); ++i)
+	  {
+		if( m_level[cube[i]>>1] == 0 )
+		  { 
+			// delete solutioncube stuff
+#ifdef SOLDEBUG
+			std::cout << "remove " << getLit( cube[i] ) << " from cube" << std::endl;
+#endif
+			cube[i] = cube[cube.size()-1];
+			cube.pop_back();
+			--i;
+			continue;
+		  }
+
+		if( (q_level[cube[i]>>1]&1) == 0 )
+		  { setUniFlag(cube[i]); }
+
+#ifdef SOLDEBUG
+		std::cout << getLit(cube[i]^1) << " (" << (cube[i]^1) << ") q: " << q_level[Lit(cube[i])>>1];
+		std::cout << std::endl;
+#endif
+
+		if( isUniversal(cube[i]) && q_level[Lit(cube[i])>>1] > maxulevel )
+		  { maxulevel = q_level[Lit(cube[i])>>1]; }
+
+		// flip sign for cube
+		cube[i] ^= 1;
+		// store solution cube in "q_solutioncube" for partial model
+		q_solutioncube[Lit(cube[i])>>1] = cube[i];
+	  }
+
+#ifdef SOLDEBUG
+	std::cout << std::endl << "reduced cube: " << std::endl;
+	unsigned int count = 0;
+	for( unsigned int red = 0; red != cube.size(); ++red )
+	  {
+		if( q_level[Lit(cube[red])>>1] != q_maxqlevel )
+		  { std::cout << getLit( cube[red] ) << " "; ++count;}
+	  }
+	std::cout << " (" << count << ")" << std::endl;
+#endif
+
+	unsigned int size = (unsigned int)cube.size();
+
+	if( size == 1 )
+	  {
+	  EMPTYCUBE:
+#ifdef SOLDEBUG
+		std::cout << "emptycube" << std::endl;
+#endif
+		++q_solutions;
+
+		if( !isUniversal(cube[0]) )
+		  { return false; }
+		// Backtrack to decision level 0
+		backtrack(0);
+		
+		setUnit(cube[0]);
+		//std::cout << (maxunilit-1);
+		// Add the literal as an implication to the decision stack.
+		addImplication(cube[0], NULL);
+		
+		return true;
+	  }
+
+	// new copy learned solution cube to solutionDatabase
+	unsigned int usize = sortCubeUE( cube, size, maxulevel);
+
+	if( size == 1 )
+	  { 
+		goto EMPTYCUBE;
+	  }
+	if( usize == 0 )
+	  { 
+		++q_solutions;
+		return false; 
+	  }
+
+	unsigned int* cptr(new unsigned int[size+1]);
+	unsigned int curmlevel( 0 );
+
+#ifdef SOLDEBUG
+	std::cout << "final cube" << std::endl;
+#endif
+
+	for( unsigned int i = 0; i < size; ++i )
+	  {	
+		cptr[i] = cube[i]; 
+#ifdef SOLDEBUG
+		std::cout << getLit(cube[i]) << " [" << assignedTo(cube[i]) << "] ";
+#endif
+		if( i < usize )
+		  { 
+			++resunilit;
+			if( curmlevel < m_level[Lit(cptr[i])>>1] )
+			  { curmlevel = m_level[Lit(cptr[i])>>1]; }
+		  }
+	  }
+
+#ifdef SOLDEBUG
+	std::cout << " (" << size << ")" << std::endl;
+#endif
+
+	cptr[size] = 0;
+
+	bool result = analyze(cptr, curmlevel);
+	delete[] cptr;
+	return result;
+  }
+
+  void Core::initSolOrder( void )
+  {
+
+	for(unsigned int i = q_decision; i != q_maxqlevel; ++i )
+	  {
+		while (!q_varOrder[i]->empty())
+		  {
+			unsigned int lit( q_varOrder[i]->top() << 1 );
+			q_litbylevel[i].push_back(getUniFlag(lit));
+		  }
+	  }
+  }
+#endif
+}

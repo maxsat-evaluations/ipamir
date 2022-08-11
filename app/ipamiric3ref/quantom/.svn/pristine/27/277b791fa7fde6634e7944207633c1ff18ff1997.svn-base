@@ -1,0 +1,344 @@
+
+/********************************************************************************************
+fuzzer.cpp -- Copyright (c) 2010, Tobias Schubert
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, merge, 
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons 
+to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING 
+BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+********************************************************************************************/
+
+// Include standard headers.
+#include <iostream>
+#include <cassert>
+#include <fstream>
+#include <cstdlib>
+#include <vector>
+#include <ctime>
+#include <string>
+#include <sstream>
+
+// Include antom related headers.
+#include "antom.hpp"
+
+//#ifdef SW
+
+// Generates random unsat-QBF-Formulas
+int main (void)
+{ 
+  // Initialization.
+  std::cout.precision(1);
+  std::cout.setf(std::ios::unitbuf);
+  std::cout.setf(std::ios::fixed);
+
+  // Output.
+  std::cout << "c ------------------------------------------------------------------------" << std::endl
+			<< "c QBFgenerator, Tobias Schubert, Sven Reimer, University of Freiburg, 2011" << std::endl
+			<< "c ------------------------------------------------------------------------" << std::endl;
+
+  // Initialize the random number generator's seed.
+  srand(time(NULL));
+
+  // Initialization.
+  unsigned int checks(50000); 
+  unsigned int sat(0);
+  unsigned int unsat(0);
+
+  
+  // First generate unsatisfied clause set, then add a random prefix 
+  for (unsigned int i = 1; i <= checks; ++i)
+    {
+
+#ifdef SW
+      // Some variables.
+      unsigned int layers(rand() % 20 + 10);
+      unsigned int gwidth(rand() % 61 + 10); 
+      unsigned int var(0);
+      unsigned int cla(0);
+      std::vector<unsigned int> width(layers+1, 0);
+      std::vector<std::pair<unsigned int, unsigned int> > variables(layers+1, std::make_pair(0,0));
+      std::vector<double> ratio(layers+1, 0.0);
+      std::vector<unsigned int> clauses(layers+1, 0);
+      
+      // Initialization.
+      result1 = 0;
+
+      // Output. 
+      std::cout << std::endl
+				<< "c ===========================================" << std::endl
+				<< "c     check: " << i << " / " << checks << std::endl
+				<< "c       sat: " << sat << std::endl
+				<< "c     unsat: " << unsat << std::endl;
+      
+      // Initialize the variables defined before.
+      for (unsigned int l = 1; l <= layers; ++l)
+		{
+
+		  // Select the width of the current layer.
+		  width[l] = rand() % (gwidth - 9) + 10;
+	  
+		  // Select the range of the set of new variables introduced by the current layer.
+		  variables[l].first = variables[l-1].second + 1;
+		  variables[l].second = variables[l].first + width[l]; 
+	  
+		  // Select the clause variable ratio of the current layer (between 3 and 4.5).
+		  ratio[l] = (double) (rand() % 151 + 300) / 100; 
+	  
+		  // Determine the number of clauses of the current layer.
+		  unsigned int h(width[l] + width[l-1]);
+		  clauses[l] = ratio[l] * h; 
+	  
+		  // Update the total number of clauses.
+		  cla += clauses[l]; 
+		}
+      
+      // Get the total number of variables.
+      var = variables[layers].second;
+
+	  unsigned int qlevel = (rand() % 10) + 3;
+	  if( (qlevel % 2) == 0 ) { ++qlevel; }
+      
+      // Output. 
+      std::cout << "c variables: " << var << std::endl
+				<< "c   clauses: " << cla << std::endl
+				<< "c   qlevels: " << qlevel << std::endl 
+				<< "c ===========================================" << std::endl << std::endl;
+
+      // Open the dimacs file.
+      std::ofstream dimacs("test.cnf");
+      
+      // Write the "p cnf..." line.
+      dimacs << "p cnf " << var << " " << cla << "\n";
+
+	  // Open the qdimacs file.
+	  std::stringstream ss;
+	  ss << "test" << i << ".qdimacs";
+	  std::string file = ss.str();
+	  std::ofstream qdimacs(file.c_str());
+	  
+	  // Write the "p cnf..." line.
+	  qdimacs << "p cnf " << var << " " << cla << "\n";
+	  
+	  bool startwithE = (rand() % 2) == 0;
+	  
+	  std::vector<unsigned int> quantlevel( qlevel, 0 );
+	  std::vector<unsigned int> varqlevel( var+1, 0 );
+
+	  unsigned int qratio = var/qlevel;
+
+	  unsigned int f = 0;
+	  unsigned int k(1);
+	  unsigned int sum( 0 );
+	  unsigned int beginlast(0);
+
+
+	  if( !startwithE ) 
+		{ ++f; }
+
+	  for(; f != qlevel; ++f )
+		{
+		  // Universal quant levels
+		  if( (f % 2) != 0 )
+			{
+			  quantlevel[f] = ( (rand() % 3 ) + 1);
+
+			  qdimacs << "a ";
+			  std::cout << "a ";
+			}
+		  // Existential quant levels
+		  else
+			{
+			  quantlevel[f] = ( (rand() % qratio)+1)*2;
+
+			  qdimacs << "e ";
+			  std::cout << "e ";
+			}
+
+		  if( f == (qlevel - 1) )
+			{
+			  beginlast = sum;
+			  sum = var;
+			}
+		  else
+			{
+			  sum += quantlevel[f];
+			}
+		  qratio = (var-sum)/(qlevel-f+1);
+
+		  while( k != sum+1 )
+			{
+			  if( k > var ) { break; }
+			  qdimacs << k << " ";
+			  std::cout << k << " ";
+			  varqlevel[k] = f; 
+			  ++k;
+			}
+		  qdimacs << "0\n";
+		  std::cout << std::endl;
+		}
+
+	  // Now, generate the clauses of all layers.
+	  for (unsigned int l = 1; l <= layers; ++l)
+		{
+		  for (unsigned int c = 0; c < clauses[l]; ++c)
+			{
+			  // Initialization.
+			  std::vector<bool> used(var + 1,false); 
+
+			  // First, determine the clause length.
+			  unsigned int length(3);
+			  while ((rand() % 3) == 0 && length < var)
+				{ ++length; }
+
+			  // Initialization.
+			  bool addnewex (true);
+
+			  // Generate some literals.
+			  for (unsigned int j = 0; j < length; ++j)
+				{ 		  
+				  // First, get the range from which the next literal should be taken from.
+				  unsigned int layer(l);
+				  while (layer > 1 && (rand() % 2) == 0)
+					{ --layer; }
+
+				  // Select the next variable and its polarity.
+				  unsigned int low(variables[layer].first);
+				  unsigned int high(variables[layer].second); 
+				  unsigned int v(rand() % (high - low + 1) + low);
+				  while (used[v])
+					{ v = (rand() % var) + 1; }		 
+				  used[v] = true;
+				  unsigned int s(rand() % 2);
+
+
+				  if( (varqlevel[v] % 2 ) == 0 ) 
+					{ addnewex = false; }
+		  		  
+				  // Update "dimacs".
+				  if (s == 1)
+					{ 
+					  dimacs << "-"; 
+					  qdimacs << "-";
+					}
+				  dimacs << v << " ";
+				  qdimacs << v << " ";
+
+				  // Update "clause".
+				}
+
+			  if( addnewex )
+				{
+				  unsigned int range = var - beginlast;
+
+				  unsigned int v( (rand()%range) +beginlast+1 );
+
+				  assert( varqlevel[v] == (qlevel-1) );
+				  assert( !used[v] );
+
+				  unsigned int s( rand()%2 );
+
+				  // Update "dimacs".
+				  if (s == 1)
+					{ 
+					  dimacs << "-"; 
+					  qdimacs << "-";
+					}
+				  dimacs << v << " ";
+				  qdimacs << v << " ";
+				}
+				  
+			  // Add the final clause stopper.
+			  dimacs << "0\n";
+			  qdimacs << "0\n";
+			}
+		}
+
+	  // Close the dimacs file.
+      dimacs.close();
+	  qdimacs.close();
+
+      // Use antom as an external tool to solve the entire CNF formula.
+      int result1 = system("./antom test.cnf | ./satverifier test.cnf") >> 8;
+
+	  // Generated clause set unsat? Add random prefix
+	  if( result1 == 20 )
+		{
+		  ++unsat;
+		  std::cout << "c Problem UNSAT" << std::endl;
+		  std::stringstream command;
+		  command << "./quantomdb " << file;
+		  int result2 = system(command.str().c_str()) >> 8;
+
+		  if( result1 != result2 )
+			{
+			  std::cout << "Something went wrong" << std::endl;
+			  exit(0);
+			}
+		}
+	  else { ++sat;}
+	  
+      // Remove "test.cnf".
+      system("rm -r -f test.cnf");
+
+	  std::stringstream remstr;
+	  remstr << "rm -r -f " << file;
+      system(remstr.str().c_str());
+
+#else
+	  std::cout << "c ===========================================" << std::endl
+				<< "c     check: " << i << " / " << checks << std::endl
+				<< "c       sat: " << sat << std::endl
+				<< "c     unsat: " << unsat << std::endl;
+
+	  if( system("./qbfuzz.py > test.qdimacs") != 0 )
+		{return 0; }
+
+	  int resul1 = system("../../../../quaig_working/trunk/QuBE/QuBE7 test.qdimacs -all -solve") >> 8;
+
+	  if( resul1 == 10 )
+		{ ++sat;}
+	  else
+		{ ++unsat;}
+
+	  int resul2 = system("./quantom test.qdimacs") >> 8;
+
+
+	  if( resul2 != 0 && resul1 != resul2 )
+		{
+		  std::cout << "Something went wrong (with vsids)" << std::endl
+					<< "Problem is " << (resul1==10?"SAT":"UNSAT") << " and is classified as "
+					<< (resul2==10?"SAT":"UNSAT") << std::endl;
+		  break;
+		}
+
+	  int resul3 = system("./quantom_wov test.qdimacs") >> 8;
+
+	  if( resul3 != 0 && resul1 != resul3 )
+		{
+		  std::cout << "Something went wrong (without vsids)" << std::endl
+					<< "Problem is " << (resul1==10?"SAT":"UNSAT") << " and is classified as "
+					<< (resul3==10?"SAT":"UNSAT") << std::endl;
+		  break;
+		}
+
+	  if( system("rm -f test.qdimacs") != 0 )
+		{return 0;}
+
+#endif
+
+	  
+    }
+
+  // Terminate the fuzzer.
+  return(0);
+}

@@ -1,0 +1,108 @@
+#include "core.hpp"
+
+namespace quantom {
+  
+  struct config
+  {
+
+  public:
+	//Constructor
+	config (void):
+	{
+	  srand((unsigned int)time(0));
+	  c_decheu = rand() % 4;
+	  c_restartheu = (rand() % 3) + 1;
+	  c_lubyshift = (rand() % 16) + 4;
+	  c_picoinner = (rand() % 64)*16 + 512;
+	  c_picoouter = (rand() % 4 )*8 + 16;
+	  c_ip = rand() % 4;
+	  c_svs = rand() % 2;
+	  c_cacheswap = rand() % 2;
+	  c_agility = rand() % 2;
+	  c_timeout = 0.0;
+	  c_result = QUANTOM_UNKNOWN;
+	  c_time = 0.0;
+	}
+
+	config( unsigned int decheu, unsigned int restartheu, unsigned int lubyshift, unsigned int picoinner, unsigned int picoouter, unsigned int ip, bool svs, bool cacheswap, bool agility, double timeout):
+	  c_decheu(decheu),
+	  c_restartheu(restartheu),
+	  c_lubyshift(lubyshift),
+	  c_picoinner(picoinner),
+	  c_picoouter(picoouter),
+	  c_ip(ip),
+	  c_svs(svs),
+	  c_cacheswap(cacheswap),
+	  c_agility(agility),
+	  c_timeout(timeout),
+	  c_result(QUANTOM_UNKNOWN),
+	  c_time(0.0)
+	{}
+
+	// Destructor
+	~config (void) {};
+
+	void setSolver( Core::Core* solvercore ) const
+	{
+	  solvercore->setDecHeu(c_decheu);
+	  solvercore->setRestartHeu(c_restartheu);
+	  solvercore->setLubyShift(c_lubyshift);
+	  solvercore->setPicoLoops(c_picoinner, c_picoouter);
+	  solvercore->setIP(c_ip);
+	  solvercore->setSwitchVarSign(c_svs);
+	  solvercore->setCacheSwap(c_cacheswap);
+	  solvercore->setAgility(c_agility);
+	  solvercore->setCPULimit(c_timeout);
+	}
+
+	void setTimeout( double timeout )
+	{ c_timeout = timeout; }
+
+	void storeResult( unsigned int result, double time)
+	{
+	  c_result = result;
+	  c_time = time;
+	}
+
+	unsigned int getResult( void ) const
+	{ return c_result; }
+
+	double getTime( void ) const
+	{ return c_time; }
+
+	void printConfig( void ) const
+	{
+	  std::cout << "===================" << std::endl
+				<< "start configuration" << std::endl << std::endl
+				<< "setDecHeu(" << c_decheu << ");" << std::endl
+				<< "setRestartHeu(" << c_restartheu << ");" << std::endl
+				<< "setIP(" << c_ip << ");" << std::endl
+				<< "setSwitchVarSign(" << (c_svs?"true":"false") << ");" << std::endl				
+				<< "setCacheSwap(" << (c_cacheswap?"true":"false") << ");" << std::endl
+				<< "setAgility(" << (c_agility?"true":"false") << ");" << std::endl;
+
+	  if( c_restartheu == 1 )
+		{ std::cout << "setLubyShift(" << c_lubyshift << ")" << std::endl; }
+	  if( c_restartheu == 2 )
+		{ std::cout << "setPicoLoops(" << c_picoinner << "," << c_picoouter << ")" << std::endl; }
+
+	  std::cout << "end configuration" << std::endl
+				<< "===================" << std::endl;
+	}
+	
+  private:
+	unsigned int c_decheu;
+	unsigned int c_restartheu;
+	unsigned int c_lubyshift;
+	unsigned int c_picoinner;
+	unsigned int c_picoouter;
+	unsigned int c_ip;
+	bool c_svs;
+	bool c_cacheswap;
+	bool c_agility;
+	double c_timeout;
+	unsigned int c_result;
+	double c_time;
+  }
+
+}

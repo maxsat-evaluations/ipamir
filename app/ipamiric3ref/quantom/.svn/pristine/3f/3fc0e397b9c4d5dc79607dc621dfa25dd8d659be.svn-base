@@ -1,0 +1,213 @@
+/*c interface */
+
+// Include standard headers.
+#include <iostream>
+#include <cassert>
+#include <vector>
+
+// Include quantom related headers.
+#include "core.hpp" 
+
+// Definition of the C interface.
+extern "C" 
+{
+  // Some global variables. 
+  static std::vector<quantom::Core*> q_myCores; 
+  static std::vector<unsigned int> q_myClause; 
+  static std::vector<unsigned int> q_myAssumptions;
+  static unsigned int q_max; 
+
+  // Sets the number of quantom objects to be used. Note, that the various antom objects can be accessed 
+  // individually by specifying the object's id (0..num-1), but that they are not running in parallel. 
+  // Furthermore, "setNumAntomObjects" has to be called before any other routine. Each SAT solving unit 
+  // still has to be initialized afterwards by calling "initializeAntom". 
+  void q_setNumQuantomObjects (unsigned int num) 
+  { q_myCores.resize(num); q_max = num; q_myClause.resize(1); }
+  
+  // Initializes the QBF solving unit.
+  void q_initializeQuantom (unsigned int id) 
+  { assert(id < q_max); q_myCores[id] = new quantom::Core(); }
+
+  // Initializes all SAT solving units. 
+  void q_initializeAllQuantomObjects (void)
+  {
+    for (unsigned int m = 0; m < q_max; ++m)
+      { if (q_myCores[m] == NULL) { q_myCores[m] = new quantom::Core(); } }
+  }
+
+  // Deletes the QBF solving unit. 
+  void q_deleteQuantom (unsigned int id) 
+  { assert(id < q_max); assert(q_myCores[id] != NULL); delete q_myCores[id]; q_myCores[id] = NULL; } 
+
+  // Deletes all QBF solving units. 
+  void q_deleteAllQuantomObjects (void)
+  {
+    for (unsigned int m = 0; m < q_max; ++m)
+      { if (q_myCores[m] != NULL) { delete q_myCores[m]; q_myCores[m] = NULL; } }
+  }
+
+  // Sets the CPU time limit before the search process 
+  // gets aborted. 
+  // 0.0: no CPU limit at all (default).               
+  void q_setCPULimit ( unsigned int id, double limit)
+  { assert(id < q_max); assert(q_myCores[id] != NULL); q_myCores[id]->setCPULimit(limit); }
+
+  // Adds a clause to the clause database. Returns 0 if the CNF formula is  
+  // unsatisfiable. Otherwise 1 will be returned. Note, that all variable indices have to be greater 
+  // than 0. Assumes that "lits != NULL" and "num > 0" holds.                                        
+  unsigned int q_addClause (unsigned int id, unsigned int* lits, unsigned int num)
+  {
+	assert(id < q_max);
+    assert(q_myCores[id] != NULL); 
+    if (q_myCores[id]->addClause(lits,num))
+      { return 1; }
+    return 0;
+  }  
+
+  // Adds a unit clause to the clause database of QBF solving unit "id". Returns 0 if the CNF formula is    
+  // unsatisfiable and 1 otherwise. The variable index of "ulit" has to be greater than 0 --> "ulit != 0". 
+  unsigned int q_addUnitClause (unsigned int id, unsigned int ulit)
+  {
+    assert(id < q_max); 
+    assert(q_myCores[id] != NULL);
+    assert(ulit != 0);
+    q_myClause[0] = ulit; 
+    if (q_myCores[id]->addClause(q_myClause))
+      { return 1; }
+    return 0;    
+  }
+
+  /* main solving routine */
+  unsigned int q_solve (unsigned int id, unsigned int* assumptions, unsigned int num)
+  {
+	assert(id < q_max);
+    assert(q_myCores[id] != NULL); 
+
+    // No assumptions specified?
+    if (assumptions == NULL || num == 0) 
+      { return q_myCores[id]->solve(); }
+
+    // Clear "myAssumptions".
+    q_myAssumptions.clear();
+
+    // Copy "assumptions" to "myAssumptions".
+    for (unsigned int l = 0; l < num; ++l)
+      { q_myAssumptions.push_back(assumptions[l]); }    
+
+    // Solve the CNF formula, taking the assumptions "ass" into account.
+    return q_myCores[id]->solve(q_myAssumptions); 
+  }
+  
+  // Returns the truth value of all variables stored in "vars" by substituting the variables  
+  // with the corresponding truth values (0 or 1).                  
+  void q_getValue (unsigned int id, unsigned int* vars, unsigned int num)
+  {
+	assert(id < q_max);
+    assert(q_myCores[id] != NULL); 
+
+    // Nothing to do?
+    if (vars == NULL || num == 0) 
+      { return; }
+
+    assert(vars != NULL && num > 0); 
+
+    // Get the satisfying variable assignment.
+    const std::vector<unsigned int>& model(q_myCores[id]->model());
+  
+    // Update "vars".
+    for (unsigned int v = 0; v < num; ++v)
+      {
+		assert(vars[v] > 0 && vars[v] < model.size()); 
+		if( model[vars[v]] == 0 )
+		  { vars[v] = 0; } //2; }
+		else
+		  {	vars[v] = (model[vars[v]]&1)^1; }
+      }
+  }
+
+  /* De/activate preprocessor for solving unit "id" */
+  /* If "toggle" != 0, preprocessor will be activated (default: preprocessor is switched off) */
+  void q_setPreprocessor( unsigned int id, unsigned int toggle )
+  {
+	assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+	q_myCores[id]->setPreprocessor(toggle);
+  }
+
+  /* De/activate inprocessor for solving unit "id" */
+  /* If "toggle" != 0, inprocessor will be activated (default: preprocessor is switched off) */
+  void q_setInprocessor( unsigned int id, unsigned int toggle )
+  {
+	assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+	q_myCores[id]->setInprocessor(toggle);
+  }
+
+  /* De/activate upla routine in preprocessor for solving unit "id" */
+  /* If "toggle" != 0, upla will be activated (default: upla is switched off) */
+  void q_setUPLA( unsigned int id, unsigned int toggle )
+  {
+	assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+	q_myCores[id]->setUPLA(toggle);
+  }
+
+  /* De/activate subsumption checks in preprocessor for solving unit "id" */
+  /* If "toggle" != 0, subsumption checks will be activated (default: upla is switched off) */
+  void q_setSubsumption( unsigned int id, unsigned int toggle )
+  {
+	assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+	q_myCores[id]->setSubsumption(toggle);
+  }
+
+  /* Set Decision Heuristic */
+  /* 0: VSIDS */
+  /* 1: DLCS */
+  /* 2: DLCS+Implication */
+  /* 3: QuBE-Style (default) */
+  void q_setDecisionHeu(unsigned int id, unsigned int val )
+  {
+    assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+    q_myCores[id]->setDecHeu(val);
+  }
+
+  /* Set Restatz Heuristic */
+  /* 0: no restarts */
+  /* 1: luby (dafault) */
+  /* 2: picosat */
+  /* 3: glucose */
+  void q_setRestartHeu(unsigned int id, unsigned int val )
+  {
+    assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+    q_myCores[id]->setRestartHeu(val);
+  }
+
+  /* initial Phase for variables */
+  /* 0: occur based */
+  /* 1: '0' and all flipped */
+  /* 2: '0' and just universal flipped (default) */
+  /* 3: random */
+  void q_setIP(unsigned int id, unsigned int val )
+  {
+    assert( id < q_max );
+    assert(q_myCores[id] != NULL); 
+    q_myCores[id]->setIP(val);
+  }
+
+  /* set quantification level of "lit" to "qlevel" */
+  /* Note, even values refer to universal levels, odd values to existential */
+  /* The first (outermost) level is "1". If there is no first existential level, */
+  /* the first level is "2" */
+  unsigned int q_setQVarLevel (unsigned int id, unsigned int lit, unsigned int qlevel)
+  { 
+	assert(id < q_max);
+	assert(q_myCores[id] != NULL); 
+	if( q_myCores[id]->setQVarLevel(lit,qlevel) )
+	  { return 1; }
+	else 
+	  { return 0; }
+  }
+}

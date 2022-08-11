@@ -1,0 +1,94 @@
+
+// Some definitions.
+#define QUANTOM_UNKNOWN  0
+#define QUANTOM_SAT     10
+#define QUANTOM_UNSAT   20
+
+#define UNIFLAG  0x80000000
+#define AUNIFLAG 0x7FFFFFFF
+
+/*c interface for quantom */
+
+/* Sets the number of quantom objects to be used. Note, that the various antom objects can be accessed  */ 
+/* individually by specifying the object's id (0..num-1), but that they are not running in parallel.  */
+/* Furthermore, "setNumAntomObjects" has to be called before any other routine. Each QBF solving unit */
+/* still has to be initialized afterwards by calling "initializeAntom".                               */
+void q_setNumQuantomObjects (unsigned int num);
+
+/* Initializes the QBF solving unit with id "id". */
+void q_initializeQuantom (unsigned int id);
+
+/* Initializes all QBF solving units. */ 
+void q_initializeAllQuantomObjects (void);
+
+/* Deletes the QBF solving unit. */
+void q_deleteQuantom (unsigned int id);
+
+/* Deletes all QBF solving units. */
+void q_deleteAllQuantomObjects (void);
+
+/* Sets the CPU time limit before the search process */
+/* of gets aborted.                                  */
+/* 0.0: no CPU limit at all (default).               */
+void q_setCPULimit (unsigned int id, double limit);
+
+/* Adds a clause to the clause database. Returns 0 if the CNF formula is  */
+/* unsatisfiable. Otherwise 1 will be returned. Note, that all variable indices have to be greater */
+/* than 0. Assumes that "lits != NULL" and "num > 0" holds.                                        */
+unsigned int q_addClause (unsigned int id, unsigned int* lits, unsigned int num);
+
+/* Adds a unit clause to the clause database of QBF solving unit "id". Returns 0 if the CNF formula is   */ 
+/* unsatisfiable and 1 otherwise. The variable index of "ulit" has to be greater than 0 --> "ulit != 0". */
+unsigned int q_addUnitClause (unsigned int id, unsigned int ulit);
+
+/* Returns the truth value of all variables stored in "vars" by substituting the variables */ 
+/* with the corresponding truth values (0 or 1).                  */
+void q_getValue (unsigned int id, unsigned int* vars, unsigned int num);
+
+/* set quantification level of "lit" to "qlevel" */
+/* Note, even values refer to universal levels, odd values to existential */
+/* The first (outermost) level is "1". If there is no first existential level, */
+/* the first level is "2" */
+unsigned int q_setQVarLevel (unsigned int id, unsigned int lit, unsigned int qlevel);
+
+
+/* De/activate preprocessor for solving unit "id" */
+/* If "toggle" != 0, preprocessor will be activated (default: preprocessor is switched off) */
+void q_setPreprocessor( unsigned int id, unsigned int toggle );
+
+/* De/activate inprocessor for solving unit "id" */
+/* If "toggle" != 0, inprocessor will be activated (default: preprocessor is switched off) */
+void q_setInprocessor( unsigned int id, unsigned int toggle );
+
+/* De/activate upla reoutine in preprocessor for solving unit "id" */
+/* If "toggle" != 0, upla will be activated (default: upla is switched off) */
+void q_setUPLA( unsigned int id, unsigned int toggle );
+
+/* De/activate subsumption checks in preprocessor for solving unit "id" */
+/* If "toggle" != 0, subsumption checks will be activated (default: upla is switched off) */
+void q_setSubsumption( unsigned int id, unsigned int toggle );
+
+/* Set Decision Heuristic */
+/* 0: VSIDS */
+/* 1: DLCS */
+/* 2: DLCS+Implication */
+/* 3: QuBE-Style (default) */
+void q_setDecisionHeu(unsigned int id, unsigned int val );
+
+/* Set Restatz Heuristic */
+/* 0: no restarts */
+/* 1: luby (dafault) */
+/* 2: picosat */
+/* 3: glucose */
+void q_setRestartHeu(unsigned int id, unsigned int val );
+
+/* initial Phase for variables */
+/* 0: occur based */
+/* 1: '0' and all flipped */
+/* 2: '0' and just universal flipped (default) */
+/* 3: random */
+void q_setIP(unsigned int id, unsigned int val );
+
+/* main solving routine */
+unsigned int q_solve (unsigned int id, unsigned int* assumptions, unsigned int num);
+

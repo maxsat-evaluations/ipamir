@@ -1,0 +1,204 @@
+
+#ifndef CLAUSE_HPP
+#define CLAUSE_HPP
+
+namespace quantom
+{
+  class pointToClause
+  {
+  public:
+
+	/* Literals are stored as: Uxxx...xS
+	   where U indicates the type of quantification (U==1 <=> literal is universally quantified)
+	   S indicates the literals polarity
+	   xxx...x is the literal (30 Bits)
+	*/
+
+	pointToClause(unsigned int* cp, int lb, unsigned int fa, unsigned int size ) :
+	  wl0(0),
+	  wl1(0),
+	  wla(0),
+	  litlist(),
+	  c_clause(cp),
+	  c_lbd(lb),
+	  c_faq(fa),
+	  c_res(0),
+	  c_size(size),
+	  c_sign(0ULL),
+	  c_flag(0),
+	  c_id(0)
+	{ }
+	
+    // Destructor.
+    ~pointToClause (void) 
+	{ delete [] c_clause; }
+
+
+	void setWatches( void )
+	{
+	  wl0 = c_clause[0];
+	  
+	  if( c_faq != 1 )
+	    { wl1 = c_clause[1]; }
+	  else
+	    { wl1 = 0; }
+
+	  wla = c_clause[c_faq];
+	}
+
+    // Returns a pointer to the clause's literals.
+    unsigned int* clause (void) const { return c_clause; }
+
+    // Returns the clause's "Literals Blocks Distance".
+    unsigned int lbd (void) const { return c_lbd; }
+
+    // Sets the clause's "Literals Block Distance" to "newLBD".
+    void setLBD (unsigned int newLBD) { c_lbd = newLBD; }
+
+    // Returns the clause's position of fist universal literal.
+    unsigned int faq (void) const { return c_faq; }
+
+    // Sets pointer to first universal literal to "faq".
+    void setFAQ (unsigned int newFAQ) { c_faq = newFAQ; }
+
+    // Returns the clause's resolution steps.
+    unsigned int steps (void) const { return c_res; }
+
+	// Set the clause's resolution steps.
+    void setSteps (unsigned int steps) { c_res = steps; }
+
+    // Returns the clause's size
+    unsigned int size (void) const { return c_size; }
+
+	// Set the clause's size.
+    void setSize (unsigned int size) { c_size = size; }
+
+    // Returns the clause's signature
+    unsigned long long sign (void) const { return c_sign; }
+
+	// Set the clause's signature.c
+    void setSign (unsigned long long sign) { c_sign = sign; }
+
+    // Returns the clause's flag
+    unsigned int flag (void) const { return c_flag; }
+
+	// Set the clause's flag.
+    void setFlag (unsigned int flag) { c_flag = flag; }
+
+    unsigned long long id (void) const { return c_id; }
+
+	// Set the clause's flag.
+    void setID (unsigned long long id) { c_id = id; }
+
+	bool isLearned( void ) const { return (c_lbd > 1); }
+
+	bool isDeleted( void ) const { return (c_lbd == 0); }
+
+	// calc and set clauses signature
+	void calcSign( void )
+	{
+#ifdef PREDEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+	  c_sign = 0ULL;
+
+	  size_t pos(0);
+	  while( c_clause[pos] != 0 )
+		{
+#ifdef PREDEBUG
+		  std::cout << getLit(c_clause[pos]) << " ";
+#endif
+		  c_sign |= 1ULL << ( (c_clause[pos++]>>1) % 64);
+		}
+#ifdef PREDEBUG
+	  std::cout << std::endl << std::hex << "sign: " << c_sign << std::dec << std::endl;
+#endif
+  	} 
+
+	int hasLitPolarity( unsigned int lit ) const
+	{
+	  unsigned int pos(0);
+	  while( c_clause[pos] != 0 )
+		{
+		  if( c_clause[ pos ] == lit )
+			{
+			  return +1;
+			}
+		  else if( c_clause[ pos ] == (lit^1) )
+			{
+			  return -1;
+			}
+		  ++pos;
+		}
+	  return 0;
+	}   
+
+	inline void sort( void )
+	{ 
+	  std::sort(c_clause, c_clause + c_size );
+	}
+
+	// the three watched literals of the clause
+	unsigned int wl0;
+	unsigned int wl1;
+	unsigned int wla;
+
+	// A list of literals which should be checked for pure literal detection when satisfying the clause
+	std::vector< unsigned int > litlist;
+
+
+  private:
+
+	// Constructor
+	pointToClause(const pointToClause& );
+	pointToClause& operator=(const pointToClause& );
+
+	// The clause:
+	unsigned int* c_clause;
+
+	// Literal Blocks Distance
+	unsigned int c_lbd;
+
+	// Position of first universal variable in clause, clauses are implicit sorted 
+	unsigned int c_faq;
+
+	// Number of resolution needed for generating the clause
+	unsigned int c_res;
+
+	// Number of literals in clause
+	unsigned int c_size;
+
+	// Signature of clause - for fast subsumptioncheck
+	unsigned long long c_sign;
+
+	// Flag of clause
+	unsigned int c_flag;
+
+	unsigned long long c_id;
+  };
+
+  // A helper function to compare two clauses wrt. their "ID".
+  bool inline compareID (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).id() < (*p2).id()); }
+
+  // A helper function to compare two clauses wrt. their "Literals Blocks Distance".
+  bool inline compareLBD (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).lbd() < (*p2).lbd()); }
+
+  // A helper function to compare two clauses wrt. their "Resolution Steps".
+  bool inline compareSteps (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).steps() < (*p2).steps()); }
+
+  // A helper function to compare two clauses wrt. their "Resolution Steps".
+  bool inline compareStepsReverse (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).steps() > (*p2).steps()); }
+
+  // A helper function to compare two clauses wrt. their size.
+  bool inline compareSize (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).size() < (*p2).size()); }
+
+  // A helper function to compare two clauses wrt. their size.
+  bool inline compareSizeReverse (pointToClause* p1, pointToClause* p2)
+  { return ((*p1).size() > (*p2).size()); }
+}
+#endif

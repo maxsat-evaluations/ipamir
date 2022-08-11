@@ -1,0 +1,1019 @@
+#include "core.hpp"
+
+namespace quantom
+{
+
+  int getLit (unsigned int var)
+  { return ( (int)( Lit(var)>>1 )*( ( (var&1)==0)?1:-1 ) ); }
+
+  int Core::getLit (unsigned int var) const
+  { return ( (int)( Lit(var)>>1 )*( ( (var&1)==0)?1:-1 ) ); }
+
+  int Core::assignedTo ( unsigned int lit ) const 
+  {
+	if( m_assignment[ Lit(lit) ] ) 
+	  {
+		if( m_assignment[ Lit(lit)^1 ] ) return 2; /* lit is dc */
+		return 1;
+	  }
+	else if( m_assignment[ Lit(lit)^1 ] ) return -1;
+	else return 0;
+  }
+
+  /* Some Testing, if our learned clause contains at least one
+	 unassigned literal and no positively assigned literals.
+	 Assumes that we are already on the correct backtracklevel */
+  bool Core::checkLearnedCLause( pointToClause* ptc, unsigned int forcelit ) const
+  { 
+#ifdef ANADEBUG
+	std::cout << __func__;
+#endif
+	if( !checkSorting(ptc) ) { return false; }
+
+	/*check if we are allowed to imply the literal*/
+	if( forcelit == 0 )
+	  {
+		unsigned int depos(0);
+		unsigned int delevel(0);
+		unsigned int decount(0);
+		while( depos < ptc->faq() )
+		  {
+			if( !m_assignment[ Lit(ptc->clause()[depos])^1 ] )
+			  { 
+				++decount;
+				if( q_level[Lit(ptc->clause()[depos])>>1] > delevel )
+				  { delevel = q_level[Lit(ptc->clause()[depos])>>1]; }
+			  }
+			++depos;
+		  }
+		  
+		if( decount != 1 )
+		  {
+			std::cout << "more than one literal is unassigned" << std::endl;
+			return false; 
+		  }
+
+		while( ptc->clause()[depos] != 0 )
+		  {
+			if( !m_assignment[ Lit(ptc->clause()[depos])^1 ] && q_level[Lit(ptc->clause()[depos])>>1] < delevel )
+			  {
+				std::cout << "unassigned literal in back part of clause with lower q_level" << std::endl;
+				return false;
+			  }
+			++depos;
+		  }
+	  }
+	  
+	unsigned int i( 0 );
+	bool result(false);
+	while( ptc->clause()[i] != 0 )
+	  {
+		if( !m_assignment[Lit(ptc->clause()[i])^1] ) 
+		  { 
+			result = true;
+		  }
+		if( m_assignment[Lit(ptc->clause()[i]) ] )
+		  {
+			std::cout << "literal " << getLit(ptc->clause()[i]) << " assigned to true " << std::endl;
+			return false;
+		  }
+		++i;
+	  }
+
+	return result;
+  }
+
+  /* check if clause is correctly sorted */
+  bool Core::checkSorting( pointToClause* ptc ) const
+  {
+#ifdef ANADEBUG
+	std::cout << " " << __func__ << std::endl;
+#endif
+	bool cube = !isUniversal(ptc->clause()[0]);
+	unsigned int i( 0 );
+
+	while( ptc->clause()[i] != 0 && i < ptc->faq() )
+	  {
+		if( isUniversal(ptc->clause()[i]) == cube )
+		  {
+			std::cout << (cube?"universal ":"existential ") << "literal in front part of clause" << std::endl;
+			printClause(ptc);
+			return false;
+		  }
+		++i;
+	  }
+	if( ptc->clause()[i] != 0 )
+	  { ++i; }
+	unsigned int curlevel(0);
+	if( ptc->clause()[i] != 0 )
+	  {
+		if( isUniversal(ptc->clause()[i]) != cube )
+		  {
+			std::cout << (cube?"universal ":"existential ") << "literal in back part of clause" << std::endl;
+			printClause(ptc);
+			return false;
+		  }
+			
+		curlevel = q_level[Lit(ptc->clause()[i])>>1];
+	  }
+	else
+	  { return true; }
+	++i;
+
+	while( ptc->clause()[i] != 0 )
+	  {
+		if( isUniversal(ptc->clause()[i]) != cube )
+		  {
+			std::cout << (cube?"universal ":"existential ") << "literal in back part of clause" << std::endl;
+			printClause(ptc);
+			return false;
+		  }
+
+		if( curlevel > q_level[Lit(ptc->clause()[i])>>1] )
+		  {
+			std::cout << "something went wrong with the q_level order" << std::endl;
+			printClause(ptc);
+			return false;
+		  }
+		if( curlevel < q_level[Lit(ptc->clause()[i])>>1] )
+		  { curlevel = q_level[Lit(ptc->clause()[i])>>1]; }
+		++i;
+	  }
+	return true;
+  }
+
+  bool Core::checkAllClauses( void ) const
+  {
+	unsigned int csize = m_clauseDatabase.size();
+	for( unsigned int i = 0; i != csize; ++i )
+	  {
+		assert( m_clauseDatabase[i] != NULL );
+		if( !checkClause(m_clauseDatabase[i]) )
+		  {
+			std::cout << "messy clause" << std::endl;
+			printClause(m_clauseDatabase[i]);
+			return false;
+		  }
+	  }
+
+
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		unsigned int poslit = v<<1;
+		unsigned int neglit = (v<<1)+1;
+		unsigned int wsize = m_watches[poslit].size();
+		unsigned int wlsize = m_learnedWatches[poslit].size();
+		unsigned int osize = q_occur[poslit].size();
+
+		for( unsigned int j = 0; j != wsize; ++j )
+		  {
+			if( !checkClause(m_watches[poslit][j]) )
+			  {
+				std::cout << "messy clause: watches " << v << " pos " << j << std::endl;
+				printClause(m_watches[poslit][j]);
+				return false;
+			  }
+		  }
+
+		for( unsigned int j = 0; j != wlsize; ++j )
+		  {
+			if( !checkClause(m_learnedWatches[poslit][j]) )
+			  {
+				std::cout << "messy clause: learnedwatches " << v << " pos " << j << std::endl;
+				printClause(m_learnedWatches[poslit][j]);
+				return false;
+			  }
+		  }
+
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			if( !checkClause(q_occur[poslit][j]) )
+			  {
+				std::cout << "messy clause: occur " << v << " pos " << j << std::endl;
+				printClause(q_occur[poslit][j]);
+				return false;
+			  }
+		  }
+
+
+		wsize = m_watches[neglit].size();
+		wlsize = m_learnedWatches[neglit].size();
+		osize = q_occur[neglit].size();
+		for( unsigned int j = 0; j != wsize; ++j )
+		  {
+			if( !checkClause(m_watches[neglit][j]) )
+			  {
+				std::cout << "messy clause: watches -" << v << " pos " << j << std::endl;
+				printClause(m_watches[neglit][j]);
+				return false;
+			  }
+		  }
+
+		for( unsigned int j = 0; j != wlsize; ++j )
+		  {
+			if( !checkClause(m_learnedWatches[neglit][j]) )
+			  {
+				std::cout << "messy clause: learnedwatches -" << v << " pos " << j << std::endl;
+				printClause(m_learnedWatches[neglit][j]);
+				return false;
+			  }
+		  }
+
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			if( !checkClause(q_occur[neglit][j]) )
+			  {
+				std::cout << "messy clause: occur -" << v << " pos " << j << std::endl;
+				printClause(q_occur[neglit][j]);
+				return false;
+			  }
+		  }
+	  }
+	return true;
+  }
+
+  bool Core::checkClause( quantom::pointToClause* ptc ) const
+  {
+	if( ptc->clause()[ptc->size()] != 0 )
+	  { return false; }
+	if( ptc->faq() > ptc->size() )
+	  { return false; }
+	if( ptc->lbd() == 0 )
+	  { return false; }
+	return true;
+  }
+
+  // Checks whether we produce a clause, that we already have in our Clausedatabase
+  bool Core::checkingDuplicates( const std::vector<unsigned int>& clause, unsigned int uip ) const
+  {
+	unsigned int chlit( uip );
+	unsigned int occursize((unsigned int)q_occur[Lit(uip)].size());
+
+	for( unsigned int lit = 0 ; lit != clause.size(); ++lit )
+	  {
+		if( q_occur[Lit(clause[lit])].size() < occursize ) 
+		  {
+			occursize = (unsigned int)q_occur[Lit(clause[lit])].size();
+			chlit = clause[lit];
+		  }
+	  }
+
+	for( unsigned int i = 0; i != q_occur[Lit(chlit)].size(); ++i )
+	  {
+
+		unsigned int clauseocc( 0 );
+
+		while( q_occur[Lit(chlit)][i]->clause()[clauseocc] != 0 )
+		  { 
+			if( uip == q_occur[Lit(chlit)][i]->clause()[clauseocc] ) {break;}
+			unsigned int clausesize( 0 );
+			while ( clause[clausesize] != 0 )
+			  {
+				if( clause[clausesize] == q_occur[Lit(chlit)][i]->clause()[clauseocc] )
+				  { break; }
+				++clausesize;
+			  }
+			if( clause[clausesize] == 0 ) 
+			  { return false; }
+
+			++clauseocc;
+		  }
+
+		if( clauseocc == clause.size()+1 ) 
+		  //if( q_occur[chlit][i]->clause()[clauseocc] == 0 )
+		  { 
+			std::cout << "duplicate: ";
+			printClause( q_occur[chlit][i] );
+			return true; 
+		  }
+	  }
+	return false;
+  }
+
+  void Core::printClause ( const pointToClause* clause ) const
+  {
+	if( clause == NULL )
+	  { std::cout << "does not exists" << std::endl; return;}
+	  
+	unsigned int p(0);
+	// 0 - unsat, 1 - sat, 2 - undef
+	unsigned int sat(0);
+
+	bool dc(false);
+
+	while (clause->clause()[p] != 0)
+	  {
+		std::cout << getLit(clause->clause()[p]) << " [" << assignedTo(clause->clause()[p]) << "] " << std::flush;
+		if( isDC(clause->clause()[p]) )
+		  {
+			dc = true;
+		  }
+		else if( sat != 1 ) 
+		  {
+			if( m_assignment[Lit(clause->clause()[p])] )
+			  { sat = 1; }
+			else if( sat != 1 && !m_assignment[Lit(clause->clause()[p])^1] )
+			  {	sat = 2; }
+		  }
+		++p;
+	  } 
+
+	std::cout << ((sat == 0)?"UNSAT":((sat==1)?"SAT":"UNDEF")); 
+
+	std::cout << std::endl << "watches: " << getLit(clause->wl0) << " " << getLit(clause->wl1) << " " << getLit(clause->wla) << " lbd: " << clause->lbd() << " ressteps: " << clause->steps() << " faq: " << clause->faq() << " size: " << clause->size() << " id: " << clause->id() << std::endl
+			  << "litlist: ";
+	if( clause->litlist.empty() ) { std::cout << " empty" << std::endl; }
+	else
+	  {
+		for( unsigned int i = 0; i != clause->litlist.size(); ++i )
+		  {
+			std::cout << getLit(clause->litlist[i]) << " ";
+		  }
+		std::cout << std::endl;
+	  }
+
+	// if a literal is don't care, then the clause should be satisfied IFF it is a static clause
+	if( !( !dc || isUniversal(clause->clause()[0]) || clause->lbd() != 1 || sat == 1 ) )
+	  { 
+	    assert(false);
+      }
+
+	return;
+  }
+
+  void Core::printClause ( const unsigned int* clause, bool checkconflict ) const
+  {
+	if( clause == NULL )
+	  { std::cout << "does not exists"; return;}
+
+	unsigned int assigned(0);
+
+	if( m_binConflict[0] != 0 )
+	  { 
+		std::cout << getLit(m_binConflict[0]) << " [" << assignedTo(m_binConflict[0]) << "] "
+				  << getLit(m_binConflict[1]) << " [" << assignedTo(m_binConflict[1]) << "] " << std::endl;
+		assert(!checkconflict || !(m_assignment[Lit(m_binConflict[0])] && m_assignment[Lit(m_binConflict[1])])); 
+	  }
+	else
+	  {
+		unsigned int p(0);
+		while (clause[p] != 0)
+		  {
+			std::cout << getLit(clause[p]) << " [" << assignedTo(clause[p]) << "] ";
+			if( m_assignment[Lit(clause[p])] && !isUniversal(clause[p]))
+			  { ++assigned; }
+			++p;
+		  } 
+	  }
+
+	if(checkconflict && assigned > 1)
+	  { 
+		assert(false);
+	  }
+	return;
+  }
+
+  void Core::printClause ( const std::vector< unsigned int >& clause ) const
+  {
+	if( clause.size() == 0 )
+	  { std::cout << "does not exists"; return;}
+
+	for( unsigned int p = 0; p != clause.size(); ++p)
+	  { std::cout << getLit(clause[p]) << " [" << assignedTo(clause[p]) << "] "; }
+
+	return;
+  }
+
+  void Core::printBinaries( unsigned int lit ) const
+  {
+	for(unsigned int i = 0; i != m_binWatches[Lit(lit)].size(); ++i)
+	  { std::cout << i << ": " << getLit(lit) << " [" << assignedTo(lit) << "] " << getLit(m_binWatches[Lit(lit)][i]) << " [" << assignedTo(lit) << "]" << std::endl; }
+	return;
+  }
+
+  void Core::printOccur( unsigned int lit ) const
+  {
+	for(unsigned int i = 0; i != q_occur[Lit(lit)].size(); ++i)
+	  { std::cout << i << ": "; printClause(q_occur[Lit(lit)][i]); }
+	return;
+  }
+	
+  void Core::printOccurlist( void ) const
+  {
+	std::cout << __func__ << std::endl;
+
+	for( unsigned int v = 1; v <= m_variables; ++v)
+	  {
+		std::cout << "occur of " << v << std::endl;
+		for(unsigned int i = 0; i != q_occur[v<<1].size(); ++i )
+		  {
+			std::cout << i << ": ";
+			printClause(q_occur[v<<1][i]);
+			std::cout << std::endl;
+		  }
+
+		std::cout << "occur of -" << v << std::endl;
+		for(unsigned int i = 0; i != q_occur[(v<<1)^1].size(); ++i )
+		  {
+			std::cout << i << ": ";
+			printClause(q_occur[(v<<1)^1][i]);
+			std::cout << std::endl;
+		  }
+	  }
+	return;
+  }
+
+  void Core::printWatches( unsigned int lit ) const
+  {
+	std::cout << "watchlist of " << getLit(lit) << std::endl;
+	std::cout << "static watches: " << std::endl;
+	for( unsigned int i = 0; i != m_watches[Lit(lit)].size(); ++i )
+	  {
+		printClause(m_watches[Lit(lit)][i]);
+	  }
+
+	std::cout << "dynamic watches: " << std::endl;
+	for( unsigned int i = 0; i != m_learnedWatches[Lit(lit)].size(); ++i )
+	  {
+		printClause(m_learnedWatches[Lit(lit)][i]);
+	  }
+
+	std::cout << "cube watches: " << std::endl;
+	for( unsigned int i = 0; i != q_cubeWatches[Lit(lit)].size(); ++i )
+	  {
+		printClause(q_cubeWatches[Lit(lit)][i]);
+	  }
+  }
+
+  void Core::printWatchLists( void ) const
+  {
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		if( q_deleted[v] )
+		  { continue; }
+		unsigned int poslit(v<<1);
+		unsigned int neglit(poslit^1);
+
+		printWatches(poslit);
+		printWatches(neglit);
+	  }
+  }
+
+  void Core::printdatabase ( bool watches ) const
+  {
+	  
+	std::cout << __func__ << std::endl << "qlevel" << std::endl;
+	for( unsigned int i = 0; i != q_level.size(); ++i)
+	  {
+		if(q_level[i]>0) 
+		  { std::cout << i << ": " <<  ( ( ( q_level[i] & 1 ) == 0 )?"a ":"e ") << "l: " << q_level[i] << " r: " << q_reason[i] << " m: " << m_level[i] << " del: " << q_deleted[i] << " dt: " << m_donttouch[i] << std::endl; }
+	  }
+
+	std::cout << "org: " << std::endl;
+	for(unsigned int b = 2; b != m_binWatches.size(); ++b )
+	  {
+		if( m_binWatches[b].size() != 0 )
+		  {
+			std::cout << getLit(b) << " learnedpos: " << m_binWatchesLearnedIndex[b] << std::endl;
+			for( unsigned int s = 0; s != m_binWatches[b].size(); ++s)
+			  {
+				std::cout << getLit(b) << " [" << assignedTo(b) << "] " << getLit(m_binWatches[b][s]) << " [" << assignedTo(m_binWatches[b][s]) << "] ";
+				if( s >= m_binWatchesLearnedIndex[b] )
+				  { std::cout << "L "; }
+
+				if( m_assignment[b^1] && m_assignment[Lit(m_binWatches[b][s])^1] )
+				  {
+					std::cout << "UNSAT";
+				  }
+				else if( m_assignment[b] )
+				  {
+					assert( !isDC(b) || m_assignment[Lit(m_binWatches[b][s])] );
+					std::cout << "SAT";
+				  }
+				else if( m_assignment[Lit(m_binWatches[b][s])] )
+				  {
+					assert( !isDC(m_binWatches[b][s]) );
+					std::cout << "SAT";
+				  }
+				else
+				  { std::cout << "UNDEF"; }
+				  
+				std::cout << std::endl;
+			  }
+		  }
+	  }
+
+	std::cout << std::endl << "nary: " << std::endl;
+
+	for(unsigned int c = 0; c != m_clauseDatabase.size(); ++c )
+	  {
+		std::cout << c << ": ";
+		printClause(m_clauseDatabase[c]);
+		assert( m_clauseDatabase[c] != NULL );
+		assert( m_clauseDatabase[c]->clause() != NULL );
+		assert( m_clauseDatabase[c]->clause()[0] != 0 );
+		assert( m_clauseDatabase[c]->clause()[m_clauseDatabase[c]->size()] == 0 );
+		assert( m_clauseDatabase[c]->faq() <= m_clauseDatabase[c]->size() );
+		checkSorting(m_clauseDatabase[c]);
+	  }
+
+	std::cout << std::endl << "occurlist:" << std::endl;
+	for( unsigned int l = 2; l != q_occur.size(); ++l )
+	  {
+		if( m_binWatches[l].size() == 0 && q_occur[l].size() == 0 )
+		  { continue; }
+
+		std::cout << ((l&1)==0?"":"-")<< (l>>1) << " occurs in " << (q_occur[l].size() + m_binWatches[l].size() ) << " org clauses " << std::endl;
+		  
+		for( unsigned int s = 0; s != m_binWatches[l].size(); ++s)
+		  {
+			std::cout << getLit(l) << " [" << assignedTo(l) << "] " << getLit(m_binWatches[l][s]) << " [" << assignedTo(m_binWatches[l][s]) << "] " << std::endl;
+		  }
+
+		for(unsigned int j = 0; j != q_occur[l].size() ; ++j )
+		  {
+			const pointToClause* clause(q_occur[l][j]);
+
+			assert( clause != NULL );
+			assert( clause->clause() != NULL );
+			assert( clause->clause()[0] != 0 );
+
+			std::cout << j << ": ";
+			printClause(clause);
+
+		  }
+		std::cout << std::endl;
+
+		// if variable is deleted, all occurence lists have to be empty
+		assert( !q_deleted[l>>1] || 
+				( ( m_binWatches[l].empty() && q_occur[l].empty() ) &&
+				  ( m_binWatches[l^1].empty() && q_occur[l^1].empty() ) ) );
+	  }
+
+	if( watches )
+	  {
+		std::cout << std::endl << "watchedliterals: " << std::endl;
+		for( unsigned int c = 2; c != m_watches.size(); ++c )
+		  {
+			const std::vector< pointToClause* > watches(m_watches[c]);
+
+			if( watches.empty() ) 
+			  {continue; }
+
+			std::cout << getLit(c) << " watches: " << std::endl;
+			for( unsigned int w = 0; w != watches.size(); ++w )
+			  {
+				printClause(watches[w]);
+
+				assert( ( watches[w]->wl0 == c ) || ( watches[w]->wl1 == c ) || ( Lit(watches[w]->wla) == c ) );
+				assert( ( watches[w]->faq() != watches[w]->size() ) || ( watches[w]->wla == 0 ) );
+				assert( watches[w]->lbd() == 1 );
+				assert( watches[w]->clause()[watches[w]->size()] == 0 );
+				assert( watches[w]->faq() <= watches[w]->size() );
+			  }
+			std::cout << std::endl;
+		  }
+		std::cout << std::endl << "learned watches: " << std::endl;
+		for( unsigned int c = 2; c != m_learnedWatches.size(); ++c )
+		  {
+			const std::vector< pointToClause* > watches(m_learnedWatches[c]);
+
+			if( watches.empty() ) 
+			  { continue; }
+
+			std::cout << getLit(c) << " watches: " << std::endl;
+			for( unsigned int w = 0; w != watches.size(); ++w )
+			  {
+				printClause(watches[w]);
+
+				assert( ( watches[w]->wl0 == c ) || ( watches[w]->wl1 == c ) || ( Lit(watches[w]->wla) == c ) );
+				assert( ( watches[w]->faq() != watches[w]->size() ) || ( watches[w]->wla == 0 ) );
+				assert( watches[w]->lbd() > 1 );
+				assert( watches[w]->clause()[watches[w]->size()] == 0 );
+				assert( watches[w]->faq() <= watches[w]->size() );
+			  }
+			std::cout << std::endl;
+		  }
+
+		std::cout << "cubes: " << std::endl;
+
+		for(unsigned int c = 0; c != q_solutionDatabase.size(); ++c )
+		  {
+			printClause(q_solutionDatabase[c]);
+		  }
+	  
+		std::cout << std::endl << "qube watches: " << std::endl;
+		for( unsigned int c = 2; c != q_cubeWatches.size(); ++c )
+		  {
+			const std::vector< pointToClause* > watches(q_cubeWatches[c]);
+
+			if( watches.empty() ) 
+			  { continue; }
+
+			std::cout << getLit(c) << " watches: " << std::endl;
+			for( unsigned int w = 0; w != watches.size(); ++w )
+			  {
+				printClause(watches[w]);
+				assert( ( Lit(watches[w]->wl0) == c ) || ( Lit(watches[w]->wl1) == c ) || ( watches[w]->wla == c ) );
+				assert( ( watches[w]->faq() != watches[w]->size() ) || ( watches[w]->wla == 0 ) );
+				assert( watches[w]->lbd() > 1 );
+			  }
+			std::cout << std::endl;
+		  }
+		std::cout << std::endl;
+	  }
+
+	std::cout << "end " << __func__ << std::endl;
+	return;
+  }
+
+  void Core::exportDatabase( std::ostream& os ) const
+	{
+	  std::cout << __func__ << std::endl;
+	  unsigned int clauses(0);
+	  std::vector< std::vector< unsigned int > > prefix;
+	  prefix.resize( q_maxqlevel+1 );
+	  for(unsigned int i = 1; i <= m_variables; ++i)
+		{
+		  clauses += m_binWatches[i<<1].size();
+		  clauses += m_binWatches[(i<<1)^1].size();
+
+		  if ( m_binWatches[i<<1].size() + m_binWatches[(i<<1)^1].size() + q_occur[i<<1].size() + q_occur[(i<<1)^1].size() > 0 )
+			{
+			  std::vector< unsigned int >& varpre = prefix[q_level[i]];
+			  varpre.push_back(i);
+			}
+		}
+
+	  clauses = clauses/2;
+	  clauses += m_clauseDatabase.size();
+	  os << "p cnf " << m_variables << " " << clauses << std::endl;
+
+	  for( unsigned int j = 1; j != prefix.size(); ++j )
+		{
+		  os << (( (j&1) != 0 )? "e ":"a ");
+		  for( unsigned int l = 0; l != prefix[j].size(); ++l )
+			{
+			  os << prefix[j][l] << " ";
+			}
+		  os << "0" << std::endl;
+		}
+
+	  std::vector<std::set<int> > used( (m_variables << 1)+2 );
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+
+		  std::set<int>& usedneglit = used[(v<<1)];
+        
+		  for( unsigned int i = 0; i < m_binWatches[v<<1].size(); ++i )
+			{
+			  if( usedneglit.find( m_binWatches[v<<1][i] ) == usedneglit.end() )
+				{
+				  usedneglit.insert( m_binWatches[v<<1][i] );
+				  used[ Lit(m_binWatches[v<<1][i]) ].insert( (v<<1) );
+                
+				  os << v << " " << getLit(m_binWatches[v<<1][i]) << " 0" << std::endl;
+				}
+			}
+
+		  std::set<int>& usedposlit = used[(v<<1)^1];
+        
+		  for( unsigned int i = 0; i < m_binWatches[(v<<1)^1].size(); ++i )
+			{
+			  if( usedposlit.find( m_binWatches[(v<<1)^1][i] ) == usedposlit.end() )
+				{
+				  usedposlit.insert( m_binWatches[(v<<1)^1][i] );
+				  used[ Lit(m_binWatches[(v<<1)^1][i]) ].insert( (v<<1)^1 );
+                
+				  os << "-" << v << " " << getLit(m_binWatches[(v<<1)^1][i]) << " 0" << std::endl;
+				}
+			}
+		}
+	  
+	  for( unsigned int d = 0; d != m_clauseDatabase.size(); ++d )
+		{
+		  unsigned int pos(0);
+		  while( m_clauseDatabase[d]->clause()[pos] != 0 )
+			{
+			  os << getLit(m_clauseDatabase[d]->clause()[pos]) << " ";
+			  ++pos;
+			}
+		  os << "0" << std::endl;
+		}
+	}
+
+  void Core::dumpCNF( std::ostream& os ) const
+	{
+#ifdef DEBUG
+	  std::cout << __func__ << std::endl;
+#endif
+
+	  std::vector< std::vector< int > > restclauses;
+	  restclauses.reserve( m_clauseDatabase.size() );
+
+	  unsigned int variables(0);
+
+	  std::vector < std::vector< int > > remainvar;
+	  remainvar.resize( q_maxqlevel+1 );
+
+	  /*collect binary clauses*/
+	  for( unsigned int v = 1; v <= m_variables; ++v )
+		{
+
+		  if( q_deleted[v] )
+			{ continue; }
+
+		  remainvar[q_level[v]].push_back(v); 
+		  if( v > variables )
+			{ variables = v; }
+
+		  std::vector< unsigned int > binwatch = m_binWatches[ v<<1 ];
+		  for( unsigned int i = 0; i != binwatch.size(); ++i )
+			{
+			  if( (Lit(binwatch[i])>>1) > v && !m_assignment[Lit(binwatch[i])] )
+				{
+				  std::vector< int > tmpclause(2,0);
+				  tmpclause[0] = v;
+				  tmpclause[1] = getLit(binwatch[i]);
+				  restclauses.push_back(tmpclause);
+				}
+			}
+
+		  binwatch = m_binWatches[ (v<<1)+1 ];
+		  for( unsigned int i = 0; i != binwatch.size(); ++i )
+			{
+			  if( (Lit(binwatch[i])>>1) > v && !m_assignment[Lit(binwatch[i])] )
+				{
+				  std::vector< int > tmpclause(2,0);
+				  tmpclause[0] = -v;
+				  tmpclause[1] = getLit(binwatch[i]);
+				  restclauses.push_back(tmpclause);
+				}
+			}
+		}
+
+	  unsigned int eorgclauses = m_clauseDatabase.size();
+
+	  /* now collect all n-ary clauses of the original problem */
+	  for(unsigned int i = 0; i != eorgclauses; ++i )
+		{
+		  pointToClause* ptc = m_clauseDatabase[i];
+
+		  if( ptc->lbd() == 0 )
+			{ continue; }
+
+		  std::vector< int > tmpclause;
+		
+		  unsigned int pos(0);
+		  while( ptc->clause()[pos] != 0 )
+			{
+			  assert( !q_deleted[Lit(ptc->clause()[pos])>>1] );
+			  tmpclause.push_back( getLit(ptc->clause()[pos]) ); 
+			  ++pos;
+			}
+		  if( ptc->clause()[pos] != 0 )
+			{ continue; }
+
+		  restclauses.push_back(tmpclause);
+		}
+
+	  if( restclauses.empty() )
+		{ 
+		  std::cout << "c empty clause set" << std::endl << "c SATISFIABLE" << std::endl; 
+		  return;
+		}
+
+	  /*write cnf*/
+	  os << "p cnf " << variables << " " << restclauses.size() << std::endl;
+
+	  for( unsigned int i = 1; i != remainvar.size(); ++i)
+		{
+		  if( remainvar[i].empty() )
+			{ continue; }
+
+		  os << (((i%2)!=0)?"e ":"a ");
+
+		  for( unsigned int j = 0; j != remainvar[i].size(); ++j )
+			{ os << remainvar[i][j] << " "; }
+		  os << "0" << std::endl;;
+		}
+
+	  for(unsigned int i = 0; i != restclauses.size(); ++i )
+		{
+		  for(unsigned int j = 0; j != restclauses[i].size(); ++j)
+			{
+			  os << restclauses[i][j] << " ";
+			}
+		  os << "0" << std::endl;
+		} 
+	}
+
+#ifdef COMBSOLVER
+  void Core::dumpCNFComb( std::ostream& os ) const
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	std::vector< std::vector< int > > restclauses;
+	restclauses.reserve( m_clauseDatabase.size() );
+
+	unsigned int variables(0);
+
+	std::vector< int > remainlit;
+
+#ifdef EXPORTDEBUG
+	std::cout<< "collect literals" << std::endl;
+#endif
+	/* collect not assigned literals literals*/
+	for( unsigned int i = 0; i != q_litbylevel.size(); ++i )
+	  {
+		for( unsigned int j = 0 ; j != q_litbylevel[i].size(); ++j )
+		  {
+			if( !m_assignment[ Lit(q_litbylevel[i][j]) ] && !m_assignment[ Lit(q_litbylevel[i][j])^1 ] )
+			  { 
+#ifdef EXPORTDEBUG
+				std::cout << getLit(q_litbylevel[i][j]) << " [" << q_litbylevel[i][j] << "] (" << q_level[Lit(q_litbylevel[i][j])>>1] << ") in cnf" << std::endl;
+#endif
+				remainlit.push_back(q_litbylevel[i][j]); 
+				if( (Lit(q_litbylevel[i][j])>>1) > variables )
+				  { variables = Lit(q_litbylevel[i][j])>>1; }
+			  }
+		  }
+	  }
+
+#ifdef EXPORTDEBUG
+	std::cout<< "collect bin clauses" << std::endl;
+#endif
+	/*collect binary clauses*/
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		/* skip assigned or not occuring variables */
+		if( m_assignment[v<<1] || m_assignment[ (v<<1)+1 ] )  
+		  { continue; }
+
+		std::vector< unsigned int > binwatch = m_binWatches[ v<<1 ];
+		for( unsigned int i = 0; i != binwatch.size(); ++i )
+		  {
+			if( (Lit(binwatch[i])>>1) > v && !m_assignment[Lit(binwatch[i])] )
+			  {
+				std::vector< int > tmpclause(2,0);
+				tmpclause[0] = v;
+				tmpclause[1] = getLit(binwatch[i]);
+#ifdef EXPORTDEBUG
+				std::cout << "push clause: " << tmpclause[0] << " " << tmpclause[1] << std::endl;
+#endif
+				restclauses.push_back(tmpclause);
+			  }
+		  }
+
+		binwatch = m_binWatches[ (v<<1)+1 ];
+		for( unsigned int i = 0; i != binwatch.size(); ++i )
+		  {
+			if( (Lit(binwatch[i])>>1) > v && !m_assignment[Lit(binwatch[i])] )
+			  {
+				std::vector< int > tmpclause(2,0);
+				tmpclause[0] = -v;
+				tmpclause[1] = getLit(binwatch[i]);
+#ifdef EXPORTDEBUG
+				std::cout << "push clause: " << tmpclause[0] << " " << tmpclause[1] << std::endl;
+#endif
+				restclauses.push_back(tmpclause);
+			  }
+		  }
+	  }
+
+#ifdef EXPORTDEBUG
+	std::cout<< "collect nary-clauses e_orgclauses: " << e_orgclauses << std::endl;
+#endif
+
+	unsigned int dbsize = m_clauseDatabase.size();
+
+	/* now collect all n-ary clauses of the original problem */
+	for(unsigned int i = 0; i != dbsize; ++i )
+	  {
+		pointToClause* ptc = m_clauseDatabase[i];
+
+#ifdef EXPORTDEBUG
+		printClause(ptc);
+#endif
+
+		if( m_assignment[ptc->wl0] || m_assignment[Lit(ptc->wla)] )
+		  { continue; }
+
+		std::vector< int > tmpclause;
+		
+		unsigned int pos(0);
+#ifdef EXPORTDEBUG
+		std::cout << "push clause: ";
+#endif
+		unsigned int* lits(ptc->clause());
+		while( lits[pos] != 0 )
+		  {
+			if ( m_assignment[Lit(lits[pos])])
+			  { break; }
+			if( !m_assignment[Lit(lits[pos])^1] )
+			  { 
+				tmpclause.push_back( getLit(lits[pos]) ); 
+#ifdef EXPORTDEBUG
+				std::cout << tmpclause.back() << " ";
+#endif
+			  }
+			++pos;
+		  }
+#ifdef EXPORTDEBUG
+		std::cout << std::endl;
+#endif
+		if( lits[pos] != 0 )
+		  { continue; }
+
+		restclauses.push_back(tmpclause);
+	  }
+
+	if( restclauses.empty() )
+	  { 
+		std::cout << "c empty clause set" << std::endl << "c SATISFIABLE" << std::endl; 
+		return;
+	  }
+
+	/*write out cnf*/
+	os << "p cnf " << variables << " " << restclauses.size();
+
+	bool exists = !isUniversal(remainlit[0]);
+
+#ifdef EXPORTDEBUG
+	std::cout<< "export" << std::endl;
+#endif	
+
+	for( unsigned int i = 0; i != remainlit.size(); ++i)
+	  {
+		if( isUniversal(remainlit[i]) != exists )
+		  {
+			exists ^= 1;
+
+			if( i > 0 )
+			  { os << "0";}
+			os << std::endl << (exists?"a ":"e ");
+		  }
+
+		os << (Lit(remainlit[i])>>1) << " ";
+	  }
+	os << "0" << std::endl;
+
+	for(unsigned int i = 0; i != restclauses.size(); ++i )
+	  {
+		for(unsigned int j = 0; j != restclauses[i].size(); ++j)
+		  {
+			os << restclauses[i][j] << " ";
+		  }
+		os << "0" << std::endl;
+	  } 
+  }
+
+  void Core::updateresets( bool startsolving )
+  {
+	int exportswitch(0);
+
+	if( (lrabs::cpuTime() - e_starttime) > e_aigtimeout )
+	  { 
+		exportswitch = e_startswitching;
+		if( e_switchcount > 0 )
+		  { exportswitch >>= (e_switchcount+1); }
+
+		if( exportswitch == 0 )
+		  { exportswitch = e_startswitching; }
+
+		e_switching += exportswitch;
+#ifdef EXPORTDEBUG
+		std::cout << "reset e_switching: " << e_switching << std::endl;
+#endif
+	  }
+	else if( !startsolving || ((lrabs::cpuTime()-e_starttime)< 0.5 ) )
+	  {
+		++e_switchcount;
+		exportswitch = e_startswitching>>e_switchcount;
+
+		if ( exportswitch == 0 )
+		  {
+			e_switching = -1;
+			e_switchcount = 0;
+		  }
+		else
+		  { 
+			e_switching -= exportswitch; 
+		  }
+
+		if( e_switching < 0 )
+		  { e_switching = 0; }
+
+		e_aigtimeout += 0.5;
+		//e_togglerestart = true;
+#ifdef EXPORTDEBUG
+		std::cout << "reset e_switching: " << e_switching << std::endl;
+#endif
+	  }
+	else
+	  { --e_switching; }
+  }
+#endif
+}

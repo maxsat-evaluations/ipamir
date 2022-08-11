@@ -1,0 +1,1137 @@
+#include "core.hpp"
+
+namespace quantom {
+	
+  // Performs "Boolean Constraint Propagation". In case of a conflict, a pointer
+  // to the conflicting clause will be returned, otherwise the return value is NULL.
+  // Thismethod also takes learned cubes into account
+  unsigned int* Core::deduce ( bool checkpure )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// If "m_binConflict" is not equal to (0,0) at this point, we've got a problem.
+	assert(m_binConflict[0] == 0 && m_binConflict[1] == 0); 
+
+	if( m_dsImplIndex == m_dsEndIndex ) 
+	  { return NULL; }
+
+	// Increment "m_bcps".
+	++m_bcps;
+
+	// pointer to decisionstack for binary clause BCP
+	unsigned int bbcpp( m_dsImplIndex );
+	// pointer to decisionstack for n-nary clause BCP
+	unsigned int nbcpp( m_dsImplIndex );
+	// pointer to decisionstack for learned clause BCP
+	unsigned int lbcpp( m_dsImplIndex );
+	// pointer to decisionstack for cube BCP
+	unsigned int cbcpp( m_dsImplIndex );
+	// pointer to decisionstack for pure literal detection
+	unsigned int pbcpp( m_dsImplIndex );
+
+	std::set< unsigned int > candidates;
+
+	unsigned int* conflictingClause( NULL );
+
+	do{ 
+	  do {
+		do {
+		  do {
+			if( (conflictingClause = deduceBin(bbcpp) ) != NULL )
+			  { return conflictingClause; }
+
+			if( (conflictingClause = deduceLearned(lbcpp) ) != NULL )
+			  { return conflictingClause; }			  
+
+		  }	while ( lbcpp != m_dsEndIndex );
+
+		  if( (conflictingClause = deduceNary(nbcpp) ) != NULL )
+			{ return conflictingClause; }
+
+		} while ( nbcpp != m_dsEndIndex );
+
+		if( (conflictingClause = deduceCubes(cbcpp) ) != NULL )
+		  { return conflictingClause; }
+
+	  } while ( cbcpp != m_dsEndIndex );
+
+	} while ( detectPure(pbcpp, candidates, checkpure ) );
+
+#ifdef EXDEBUG
+	std::cout << bbcpp << " " << nbcpp << " " << lbcpp << " " << cbcpp << " " << pbcpp << " " << m_dsEndIndex << std::endl;
+#endif
+
+	assert( (bbcpp == nbcpp) && (nbcpp == lbcpp) && (lbcpp == cbcpp) && (pbcpp <= m_dsEndIndex) );
+#ifdef EXDEBUG
+	if( cbcpp != pbcpp )
+	  { std::cout << "found some dc-literals" << std::endl; }
+#endif
+
+	m_dsImplIndex = m_dsEndIndex;
+
+	return NULL;
+  }
+
+  // Performs BCP with binary clauses. Includes creation of LHBR-clauses
+  unsigned int* Core::deduceBin ( unsigned int& bbcpp )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+	  
+	unsigned int lhbrStart( 0 );
+	unsigned int lhbrLit( m_decisionStack[m_dsImplIndex] ^ 1 );
+
+  
+	// The binary clauses will be checked to see what is going on. 
+	while ( bbcpp != m_dsEndIndex)
+	  {
+		// Get the next assignment.
+		unsigned int wlit(m_decisionStack[bbcpp++] ^ 1);
+
+#ifdef DEBUG
+		std::cout << "wlit: " << getLit(wlit) << std::endl;
+#endif
+				
+		// "wlit" has to be assigned, since it's part of the decision stack.
+		assert(m_assignment[Lit(wlit)] || m_assignment[Lit(wlit) ^ 1]); 
+
+		// Initialization.
+		std::vector<unsigned int>& binWatches(m_binWatches[Lit(wlit)]); 
+		unsigned int binSize((unsigned int)binWatches.size()); 
+
+		// Process all binary clauses in which "wlit" occurs.
+		for (unsigned int b = 0; b < binSize; ++b)
+		  {
+#ifdef EXDEBUG
+			std::cout << "second in binclause: " << getLit(binWatches[b]) << " (" << assignedTo(binWatches[b]) << ")" << std::endl;
+#endif
+
+			if( b >= m_binWatchesLearnedIndex[Lit(wlit)] && ( isPureOrDC(wlit) || isPureOrDC(binWatches[b]) ) )
+			  {
+#ifdef EXDEBUG
+				std::cout << "skip bin-clause with SPL" << std::endl;
+#endif
+				continue;
+			  }
+
+			//BCPSTAT
+			++m_bcpstats[0];
+
+			// Do we have a conflict?
+			if (m_assignment[Lit(binWatches[b]) ^ 1])
+			  {
+				//BCPSTAT
+				++m_bcpstats[1];
+				  
+				// Update "m_binConflict".
+				m_binConflict[0] = wlit;
+				m_binConflict[1] = binWatches[b];
+
+				// Make sure, that the universal literal is on the second position, needed by analyze
+				if( isUniversal( wlit ) )
+				  {
+					m_binConflict[0] = m_binConflict[1];
+					m_binConflict[1] = wlit;
+				  }
+
+				assert( !isUniversal(m_binConflict[0]) );
+
+				// Reset "m_newDecision".
+				m_newDecision = false;
+
+#ifdef DEBUG
+				std::cout << "conflict: " << getLit(m_binConflict[0]) << " [" << assignedTo(m_binConflict[0]) << "] " << getLit(m_binConflict[1]) << " [" << assignedTo(m_binConflict[1]) << "]" << std::endl;
+#endif
+				// Return a dummy conflicting clause.
+				return &m_binConflict[0];  
+			  }
+		  
+			// Do we have an implication? Or maybe we have produced an universal unit clause?
+			if (!m_assignment[Lit(binWatches[b])])
+			  { 
+				// Did we have a unit universal literal? -> conflict
+				if( isUniversal(binWatches[b]) ) 
+				  {	
+					//BCPSTAT
+					++m_bcpstats[1];
+
+					// Update "m_binConflict".
+					// Make sure, that the universal literal is on the second position, needed by analyze
+					m_binConflict[0] = wlit;
+					m_binConflict[1] = binWatches[b];
+
+					assert( !isUniversal(m_binConflict[0]) );
+							
+					// Reset "m_newDecision".
+					m_newDecision = false;
+														
+#ifdef DEBUG
+					std::cout << "conflict: " << getLit(m_binConflict[0]) << " [" << assignedTo(m_binConflict[0]) << "] " << getLit(m_binConflict[1]) << " [" << assignedTo(m_binConflict[1]) << "]" << std::endl;
+#endif
+					// Return a dummy conflicting clause.
+					return &m_binConflict[0];
+				  }
+
+				//BCPSTAT
+				++m_bcpstats[2];
+				setUnit(binWatches[b]);
+				addBinImplication(binWatches[b],wlit); 
+			  }
+		  }
+
+		// Update "lhbrStart".
+		if (m_lhbr && lhbrStart == 0)
+		  { lhbrStart = bbcpp; }
+	  }
+
+  
+
+	// Can we apply "Lazy Hyper Binary Resolution" in the way Armin Biere has introduced it at 
+	// Dagstuhl Seminar 09461 "Algorithms and Applications for Next Generation SAT Solvers"?
+	if (m_lhbr && lhbrStart != 0 && m_newDecision)
+	  {
+#ifdef DEBUG
+		if( lhbrStart < m_dsEndIndex ) std::cout << "new LHBR-clauses: " << std::endl;
+#endif
+		// Generate some more binary clauses.
+		for (unsigned int i = lhbrStart; i < m_dsEndIndex; ++i)
+		  {
+#ifdef DEBUG
+			std::cout << getLit(lhbrLit) << " " << getLit(m_decisionStack[i]) << std::endl;
+#endif
+			// Store the clause "(lhbrLit, m_decisionStack[i])".
+			//m_binWatchesLearned[Lit(lhbrLit)].push_back(m_decisionStack[i]);
+			//m_binWatchesLearned[m_decisionStack[i]].push_back(lhbrLit);
+			m_binWatches[Lit(lhbrLit)].push_back(m_decisionStack[i]);
+			m_binWatches[m_decisionStack[i]].push_back(lhbrLit);
+			++m_lhbrclauses;
+		  }
+	  }
+
+	// Reset "m_newDecision".
+	m_newDecision = false;
+
+	return NULL;	  
+  }
+
+  // Perfoms BCP with n-nary clauses of the original instance
+  unsigned int* Core::deduceNary ( unsigned int& nbcpp  )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// Take a look at the non-binary clauses to see what happens there. 
+	while (nbcpp != m_dsEndIndex)
+	  {
+		// Get the next assignment.
+		unsigned int wlit(m_decisionStack[nbcpp++] ^ 1);
+	      
+		// "wlit" has to be assigned, since it's part of the decision stack.
+		assert(m_assignment[Lit(wlit)] || m_assignment[Lit(wlit) ^ 1]); 
+	      
+		// Initialization.
+		std::vector< pointToClause* >& watches(m_watches[Lit(wlit)]);
+
+		unsigned int size((unsigned int)watches.size()); 
+#ifdef DEBUG
+		std::cout << "wlit: " << getLit(wlit) << " (" << wlit << ")" << std::endl;
+#endif
+	      
+		// Process all clauses in which "wlit" currently serves as a watched literal.
+		for (unsigned int w = 0; w < size; ++w)
+		  {
+#ifdef EXDEBUG
+			std::cout << "w= " << w << ": ";
+			printClause(watches[w]);
+			std::cout << "wl0: " << getLit(watches[w]->wl0) << " (" << watches[w]->wl0 << ")" << std::flush << std::endl
+					  << "wl1: " << getLit(watches[w]->wl1) << " (" << watches[w]->wl1 << ")" << std::flush << std::endl
+					  << "wla: " << getLit(watches[w]->wla) << " (" << watches[w]->wla << ")" << std::flush << std::endl;
+#endif	
+
+			if( watches[w]->clause()[watches[w]->size()] != 0 )
+			  {
+				std::cout << "assert wlit: " << getLit(wlit) << std::endl;
+				printClause( watches[w] );
+			  }
+			if( watches[w]->faq() > watches[w]->size() )
+			  {
+				std::cout << "assert wlit: " << getLit(wlit) << std::endl;
+				printClause( watches[w] );
+			  }
+
+			assert( watches[w]->clause()[watches[w]->size()] == 0 );
+			assert( watches[w]->faq() <= watches[w]->size() );
+			// Get all watched literals.
+			unsigned int wl0(watches[w]->wl0); 
+			unsigned int wl1(watches[w]->wl1);
+			unsigned int wla(watches[w]->wla);
+
+			// wlit not watch literal? This can happen if we marked a clause -> remove wlit from list
+			if( wl0 != wlit && wl1 != wlit && wla != wlit && wl0 != wl1 )
+			  {
+#ifdef EXDEBUG
+				std::cout << "remove clause from " << getLit(wlit) << " list" << std::endl;
+#endif
+				watches[w] = watches[--size];
+				watches.pop_back();
+				--w;
+				continue;
+			  }
+
+			//BCPSTAT
+			++m_bcpstats[6];
+
+			// Ensure that "wlit" is stored at the second position of "clause", required by "analyze()".
+			// If we watch an universal literal, ensure that the unassigned literal (if exists) is stored on first position
+			if ( wl1 != 0 && (wl0 == wlit || !m_assignment[wl1^1])  )
+			  {
+				wl0 = wl1;
+				wl1 = watches[w]->wl0;
+			  }
+
+			// Clause already satisfied?
+			if( !m_assignment[ wl0 ] && !m_assignment[ wl1 ] && !m_assignment[ Lit(wla) ] )
+			  {
+				// Update watched literal after marking and redoing assignment
+				if( !isUniversal(wlit) )
+				  { 
+					if( wl1 != 0 && wl1 != wlit && wl0 != wlit )
+					  { wl1 = wlit; }
+				  }
+				else if( wlit != wla )
+				  { wla = wlit; }
+
+				// "wlit" has to be equal to either "wl0" or "wl1" or "wla".
+				assert(wl0 == wlit || wl1 == wlit || wla == wlit );
+
+				// if both existential watches are unassigned, we are done
+				if( !m_assignment[ wl0^1 ] && !m_assignment[ wl1^1 ] && wl1 != 0)
+				  { continue; }
+				
+#ifdef EXDEBUG
+				std::cout << "wl0: " << getLit(wl0) << " wl1: " << getLit(wl1) << " wla: " << getLit(wla) << std::endl;
+#endif
+
+				// At this point either wl0 is unassigned or we have a conflicting clause
+
+				unsigned int* clause = watches[w]->clause();
+
+				unsigned int pos(0);
+
+				// Try to find a new watched literal within the remainder of "clause".
+				// This loop assumes that "m_assignment[0]" and "m_assignment[1]" are both set to FALSE.
+				// It also assumes that the unassigned existential watch literal is at wl0 ( if existing )
+				while (m_assignment[Lit(clause[pos]) ^ 1] || clause[pos] == wl0 ) 
+				  { ++pos; }
+
+#ifdef EXDEBUG
+				std::cout << "pos: " << pos << " lit[pos]: " << getLit(clause[pos]) << std::endl;
+#endif
+
+				// Get the literal checked last.
+				unsigned int lit(clause[pos]); 
+
+				// We are still in the existential part of "clause"? Then we have found a new watched existential literal
+				if( pos < watches[w]->faq() )
+				  {
+					assert( !isUniversal(lit) );
+					assert( wl1 != 0 );
+					
+					// Update watching literals positions.
+					watches[w]->wl0 = lit;
+					watches[w]->wl1 = wl0;
+					
+					// watching universal literal - looking for existential watched literal
+					if( wlit == wla )
+					  { 
+						assert( m_assignment[wl1^1] );
+
+						m_watches[lit].push_back(watches[w]);
+						
+						//remove watches[w] from m_watches[wl1]
+
+						unsigned int wl1size((unsigned int)m_watches[wl1].size());
+
+						for( unsigned int ws = 0; ws != wl1size; ++ws )
+						  {
+							if( m_watches[wl1][ws]->clause() == clause)
+							  {
+
+#ifdef EXDEBUG
+								std::cout << "swap wl0/wl1 while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wl1) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								m_watches[wl1][ws] = m_watches[wl1][--wl1size];
+								m_watches[wl1].pop_back();
+								break;
+							  }
+						  }
+					  }
+					// watching existential literal - simply remove old literal from watched literal list
+					else
+					  { 
+#ifdef EXDEBUG
+						std::cout << "swap wl0/wl1 while watching wl0/wl1" << std::endl
+								  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+								  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+									
+						// Update "m_watches" for both "wlit" and "lit".
+						m_watches[lit].push_back(watches[w]); 
+						--size;	
+						watches[w] = watches[size];
+						--w;
+						watches.pop_back();
+					  }
+				  }
+				// Are we already at the end of the clause?
+				else if( lit == 0 )
+				  {
+					// At this point, we have either an implication or a conflict.
+					
+					// Conflict?
+					if (m_assignment[Lit(wl0) ^ 1])
+					  { 
+
+						//BCPSTAT
+						++m_bcpstats[7];
+
+#ifdef DEBUG
+						std::cout << "conflict: both ex lits false: " << getLit(wl0) << " " << getLit(wl1) << " of " << std::endl; printClause(clause); std::cout << std::endl;
+#endif 
+						return clause;
+					  }
+					
+					// Implication:
+					// Update watching literals;
+					if( watches[w]->wl0 != wl0 )
+					  {
+						watches[w]->wl0 = wl0;
+						watches[w]->wl1 = wl1;
+					  }
+
+					//BCPSTAT
+					++m_bcpstats[8];
+
+					setUnit(wl0);
+					// Push "wl0" as an implication onto the decision stack.
+					addImplication(wl0, clause); 
+					--nbcpp;
+					return NULL;
+				  }
+				// We are in the universal part of the clause
+				else
+				  {
+					assert( wla != 0 );
+					assert( isUniversal(lit) );
+
+					// If our universal watch literal is quantified outside wl0 and wl0 is unassigned, we're done
+					if ( !m_assignment[ wl0^1 ] && !m_assignment[Lit(wla)^1] && q_level[Lit(wla)>>1] < q_level[wl0>>1] ) 
+					  { continue; }
+
+					// Is there a universal literal which satisfies the clause?
+					unsigned int upos(pos);
+					while( !m_assignment[Lit(clause[upos])] && clause[upos] != 0 )
+					  { ++upos; }
+
+					// If there is such a literal, we're done, otherwise we have to check "clause[pos]"
+					if( clause[upos] == 0 )
+					  { 
+						// if both existential watches are assigned false, we have a contradiction
+						if( m_assignment[ wl0^1 ] && ( m_assignment[ wl1^1 ] || wl1 == 0 ) )
+						  {
+
+							//BCPSTAT
+							++m_bcpstats[7];
+
+#ifdef DEBUG
+							std::cout << "conflict: both ex lits false: " << getLit(wl0) << " " << getLit(wl1) << " of " << std::endl; printClause(clause); std::cout << std::endl;
+#endif 
+							return clause;
+						  }
+
+						// at this point wl0 has to be unassigned
+						assert( !m_assignment[wl0^1] );
+
+						// new literal found? Watch it!
+						// Due to sorting: if qlevel of "lit" is not smaller than qlevel of "wl0" then there exists no other universal lit with smaller qlevel
+						if( q_level[Lit(lit)>>1] < q_level[wl0>>1] )
+						  {
+							m_watches[Lit(lit)].push_back(watches[w]);
+							
+							watches[w]->wla = lit;
+							
+							// Remove "watches[w]" from "m_watches[wla]"
+							// If we proceed already "wla", we can simply remove it from current "watches", 
+							// Otherwise we have to determine the correct "m_watches[wla]"
+							if( wlit == wla )
+							  {
+#ifdef EXDEBUG
+								std::cout << "swap wla while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								--size;	
+								watches[w] = watches[size];
+								--w;
+								watches.pop_back();
+							  }
+							else
+							  {
+								unsigned int wlasize((unsigned int)m_watches[Lit(wla)].size());
+								for( unsigned int ws = 0; ws != wlasize; ++ws )
+								  {
+									if( m_watches[Lit(wla)][ws]->clause() == clause)
+									  {
+#ifdef EXDEBUG
+										std::cout << "swap wla while watching wl0/wl1"<< std::endl
+												  << "remove clause from watchlist of " << getLit(wla) << std::endl
+												  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+										m_watches[Lit(wla)][ws] = m_watches[Lit(wla)][--wlasize];
+										m_watches[Lit(wla)].pop_back();
+										break;	
+									  }
+								  }
+							  }
+						  }
+						// no universal literal found? Imply wl0!
+						else
+						  { 
+							assert( !m_assignment[wl0^1] );
+
+							if( watches[w]->wl0 != wl0 )
+							  {
+								watches[w]->wl0 = wl0;
+								watches[w]->wl1 = wl1;
+							  }
+
+							//BCPSTAT
+							++m_bcpstats[8];
+
+							setUnit(wl0);
+							addImplication(wl0, clause); 
+							--nbcpp;
+							return NULL;
+						  }
+					  }
+				  }
+			  }
+		  }
+	  }
+	return NULL;
+  }
+	
+  // Perfoms BCP with learned clauses
+  unsigned int* Core::deduceLearned ( unsigned int& lbcpp )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// Take a look at the non-binary clauses to see what happens there. 
+	while (lbcpp != m_dsEndIndex)
+	  {
+		// Get the next assignment.
+		unsigned int wlit(m_decisionStack[lbcpp++] ^ 1);
+	      
+		// "wlit" has to be assigned, since it's part of the decision stack.
+		assert(m_assignment[Lit(wlit)] || m_assignment[Lit(wlit) ^ 1]); 
+	      
+		// Initialization.
+		std::vector< pointToClause* >& watches(m_learnedWatches[Lit(wlit)]);
+
+		unsigned int size((unsigned int)watches.size()); 
+#ifdef DEBUG
+		std::cout << "wlit: " << getLit(wlit) << std::endl;
+#endif
+
+		if( isPureOrDC(wlit) )
+		  {
+#ifdef DEBUG
+			std::cout << "skip clause with SPL" << std::endl;
+#endif
+			continue;
+		  }
+	      
+		// Process all clauses in which "wlit" currently serves as a watched literal.
+		for (unsigned int w = 0; w < size; ++w)
+		  {
+#ifdef EXDEBUG
+			std::cout << "w= " << w << ": ";
+			printClause(watches[w]);
+#endif					
+
+			// Get all watched literals.
+			unsigned int wl0(watches[w]->wl0); 
+			unsigned int wl1(watches[w]->wl1);
+			unsigned int wla(watches[w]->wla);
+
+			//BCPSTAT
+			++m_bcpstats[9];
+
+			// Ensure that "wlit" is stored at the second position of "clause", required by "analyze()".
+			// If we watch an universal literal, ensure that the unassigned literal (if exists) is stored on first position
+			if ( wl1 != 0 && (wl0 == wlit || !m_assignment[Lit(wl1)^1])  )
+			  {
+				wl0 = wl1;
+				wl1 = watches[w]->wl0;
+			  }
+
+#ifdef DEBUG
+			std::cout << "w= " << w << ": ";
+			printClause(watches[w]);
+			std::cout << "wl0: " << getLit(wl0) << " (" << watches[w]->wl0 << ")" << std::flush << std::endl
+					  << "wl1: " << getLit(wl1) << " (" << watches[w]->wl1 << ")" << std::flush << std::endl
+					  << "wla: " << getLit(wla) << " (" << watches[w]->wla << ")" << std::flush << std::endl
+					  << wl0 << " " << wl1 << " " << wla << " " << wlit << std::endl;
+#endif	
+
+			assert( watches[w]->clause()[watches[w]->size()] == 0 );
+			assert( watches[w]->faq() <= watches[w]->size() );
+
+			// "wlit" has to be equal to either "wl0" or "wl1" or "wla".
+			assert(wl0 == wlit || wl1 == wlit || wla == wlit );
+
+			// Clause already satisfied?
+			if( !m_assignment[ wl0 ] && !m_assignment[ wl1 ] && !m_assignment[ Lit(wla) ] )
+			  {
+
+				if( isPureOrDC(wl0) || isPureOrDC(wl1) || isPureOrDC(wla) )
+				  {
+#ifdef EXDEBUG
+					std::cout << "skip clause with SPL" << std::endl;
+#endif
+					continue;
+				  }
+
+
+				// if both existential watches are unassigned, we are done
+				if( !m_assignment[wl0^1] && !m_assignment[wl1^1] && wl1 != 0)
+				  { continue; }
+				
+#ifdef EXDEBUG
+				std::cout << "wl0: " << getLit(wl0) << " wl1: " << getLit(wl1) << " wla: " << getLit(wla) << std::endl;
+#endif
+
+				// At this point either wl0 is unassigned or we have a conflicting clause
+
+				unsigned int* clause = watches[w]->clause();
+
+				// Initialization: "pos" is set to 2, since there is no need 
+				// to check the current watched literals again).
+				unsigned int pos(0);
+
+				// Try to find a new watched literal within the remainder of "clause".
+				// This loop assumes that "m_assignment[0]" and "m_assignment[1]" are both set to FALSE.
+				// It also assumes that the unassigned existential watch literal is at wl0 ( if existing )
+				while ( ( m_assignment[Lit(clause[pos]) ^ 1] || clause[pos] == wl0 ) && !isPureOrDC(clause[pos]) ) 
+				  { ++pos; }
+
+#ifdef EXDEBUG
+				std::cout << "pos: " << pos << " lit[pos]: " << getLit(clause[pos]) << std::endl;
+#endif
+
+				if( isPureOrDC(clause[pos]) )
+				  {
+#ifdef EXDEBUG
+					std::cout << "skip clause with SPL" << std::endl;
+#endif
+					continue;
+				  }
+
+				// Get the literal checked last.
+				unsigned int lit(clause[pos]); 
+
+				// We are still in the existential part of "clause"? Then we have found a new watched existential literal
+				if( pos < watches[w]->faq() )
+				  {
+					assert( !isUniversal(lit) );
+					assert( wl1 != 0 );
+					
+					// Update watching literals positions.
+					watches[w]->wl0 = wl0;
+					watches[w]->wl1 = lit;
+					
+					// watching universal literal - looking for existential watched literal
+					if( wlit == wla )
+					  { 
+						assert( m_assignment[wl1^1] );
+
+						m_learnedWatches[lit].push_back(watches[w]);
+
+						//remove watches[w] from m_watches[wl1]
+						unsigned int wl1size((unsigned int)m_learnedWatches[wl1].size());
+
+						for( unsigned int ws = 0; ws != wl1size; ++ws )
+						  {
+							if( m_learnedWatches[wl1][ws]->clause() == clause)
+							  {
+
+#ifdef EXDEBUG
+								std::cout << "swap wl0/wl1 while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wl1) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								m_learnedWatches[wl1][ws] = m_learnedWatches[wl1][--wl1size];
+								m_learnedWatches[wl1].pop_back();
+								break;
+							  }
+						  }
+					  }
+					// watching existential literal - simply remove old literal from watched literal list
+					else
+					  { 
+#ifdef EXDEBUG
+						std::cout << "swap wl0/wl1 while watching wl0/wl1" << std::endl
+								  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+								  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+									
+						// Update "m_watches" for both "wlit" and "lit".
+						m_learnedWatches[lit].push_back(watches[w]); 
+						--size;	
+						watches[w] = watches[size];
+						--w;
+						watches.pop_back();
+					  }
+				  }
+				// Are we already at the end of the clause?
+				else if( lit == 0 )
+				  {
+					// At this point, we have either an implication or a conflict.
+					
+					// Conflict?
+					if (m_assignment[ wl0^1 ])
+					  { 
+						//BCPSTAT
+						++m_bcpstats[10];
+
+#ifdef EXDEBUG
+						std::cout << "conflict: both ex lits false: " << getLit(wl0) << " " << getLit(wl1) << std::endl;
+#endif 
+						return clause;
+					  }
+					
+					// Implication:
+					// Update watching literals;
+					if( watches[w]->wl0 != wl0 )
+					  {
+						watches[w]->wl0 = wl0;
+						watches[w]->wl1 = wl1;
+					  }
+
+					//BCPSTAT
+					++m_bcpstats[11];
+			      
+					setLearnedUnit(wl0);
+					// Push "wl0" as an implication onto the decision stack.
+					addImplication(wl0, clause); 
+					--lbcpp;
+					return NULL;
+				  }
+				// We are in the universal part of the clause
+				else
+				  {
+					assert( wla != 0 );
+					assert( isUniversal(lit) );
+
+					// If our universal watch literal is quantified outside wl0 and wl0 is unassigned, we're done
+					if ( !m_assignment[wl0^1] && !m_assignment[Lit(wla)^1] && q_level[Lit(wla)>>1] < q_level[wl0>>1] ) 
+					  { continue; }
+
+					// Is there a universal literal which satisfies the clause?
+					unsigned int upos(pos);
+					while( !m_assignment[Lit(clause[upos])] && clause[upos] != 0 )
+					  { ++upos; }
+
+					// If there is such a literal, we're done, otherwise we have to check "clause[pos]"
+					if( clause[upos] == 0 )
+					  { 
+						// if both existential watches are assigned false, we have a contradiction
+						if( m_assignment[ wl0^1 ] && ( m_assignment[ wl1^1 ] || wl1 == 0 ) )
+						  {
+
+							//BCPSTAT
+							++m_bcpstats[10];
+
+#ifdef EXDEBUG
+							std::cout << "conflict: both ex lits false: " << getLit(wl0) << " " << getLit(wl1) << std::endl;
+#endif 
+							return clause;
+						  }
+
+						// at this point wl0 has to be unassigned
+						assert( !m_assignment[wl0^1] );
+
+						// new literal found? Watch it!
+						// Due to sorting: if qlevel of "lit" is not smaller than qlevel of "wl0" then there exists no other universal lit with smaller qlevel
+						if( q_level[Lit(lit)>>1] < q_level[wl0>>1] )
+						  {
+							m_learnedWatches[Lit(lit)].push_back(watches[w]);
+							
+							watches[w]->wla = lit;
+							
+							// Remove "watches[w]" from "m_watches[wla]"
+							// If we proceed already "wla", we can simply remove it from current "watches", 
+							// Otherwise we have to determine the correct "m_watches[wla]"
+							if( wlit == wla )
+							  {
+#ifdef EXDEBUG
+								std::cout << "swap wla while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								--size;	
+								watches[w] = watches[size];
+								--w;
+								watches.pop_back();
+							  }
+							else
+							  {
+								unsigned int wlasize((unsigned int)m_learnedWatches[Lit(wla)].size());
+								for( unsigned int ws = 0; ws != wlasize; ++ws )
+								  {
+									if( m_learnedWatches[Lit(wla)][ws]->clause() == clause)
+									  {
+#ifdef EXDEBUG
+										std::cout << "swap wla while watching wl0/wl1"<< std::endl
+												  << "remove clause from watchlist of " << getLit(wla) << std::endl
+												  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+										m_learnedWatches[Lit(wla)][ws] = m_learnedWatches[Lit(wla)][--wlasize];
+										m_learnedWatches[Lit(wla)].pop_back();
+										break;	
+									  }
+								  }
+							  }
+						  }
+						// no universal literal found? Imply wl0!
+						else
+						  { 
+							assert( !m_assignment[wl0^1] );
+
+							if( watches[w]->wl0 != wl0 )
+							  {
+								watches[w]->wl0 = wl0;
+								watches[w]->wl1 = wl1;
+							  }
+
+							//BCPSTAT
+							++m_bcpstats[11];
+
+							setLearnedUnit(wl0);
+							addImplication(wl0, clause); 
+							--lbcpp;
+							return NULL;
+						  }
+					  }
+				  }
+			  }
+		  }
+	  }
+	return NULL;
+  }
+
+  // Perfoms BCP with Cubes
+  unsigned int* Core::deduceCubes ( unsigned int& cbcpp )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	if(q_togglelearning)
+	  {
+		cbcpp = m_dsEndIndex;
+		return NULL;
+	  }
+
+	// Take a look at the non-binary clauses to see what happens there. 
+	while (cbcpp != m_dsEndIndex)
+	  {
+		// Get the next assignment.
+		unsigned int wlit(m_decisionStack[cbcpp++] ^ 1);
+	      
+		// "wlit" has to be assigned, since it's part of the decision stack.
+		assert(m_assignment[Lit(wlit)] || m_assignment[Lit(wlit) ^ 1]); 
+	      
+		// Initialization.
+		std::vector< pointToClause* >& watches(q_cubeWatches[Lit(wlit)]);
+
+		unsigned int size((unsigned int)watches.size()); 
+#ifdef EXDEBUG
+		std::cout << "wlit: " << getLit(wlit) << std::endl;
+#endif
+	      
+		// Process all clauses in which "wlit" currently serves as a watched literal.
+		for (unsigned int w = 0; w < size; ++w)
+		  {
+#ifdef EXDEBUG
+			std::cout << "w= " << w << ": ";
+			printClause(watches[w]);
+#endif					
+
+			// Get all watched literals.
+			unsigned int wl0(watches[w]->wl0); 
+			unsigned int wl1(watches[w]->wl1);
+			unsigned int wla(watches[w]->wla);
+
+			assert( watches[w]->clause()[watches[w]->size()] == 0 );
+			assert( watches[w]->faq() <= watches[w]->size() );
+
+			//BCPSTAT
+			++m_bcpstats[12];
+
+			// Ensure that "wlit" is stored at the second position of "clause", required by "analyze()".
+			// If we watch an universal literal, ensure that the unassigned literal (if exists) is stored on first position
+			if ( wl1 != 0 && (wl0 == wlit || !m_assignment[Lit(wl1)^1])  )
+			  {
+				wl0 = wl1;
+				wl1 = watches[w]->wl0;
+			  }
+
+			// "wlit" has to be equal to either "wl0" or "wl1" or "wla".
+			assert(wl0 == wlit || wl1 == wlit || wla == wlit );
+			
+			// Clause already satisfied?
+			if( !m_assignment[ Lit(wl0) ] && !m_assignment[ Lit(wl1)] && !m_assignment[ wla ] )
+			  {
+
+				if( isPureOrDC(wl0) || isPureOrDC(wl1) || isPureOrDC(wla) )
+				  {
+#ifdef EXDEBUG
+					std::cout << "skip clause with SPL" << std::endl;
+#endif
+					continue;
+				  }
+
+				// if both universal watches are unassigned, we are done
+				if( !m_assignment[Lit(wl0)^1] && !m_assignment[Lit(wl1)^1] && wl1 != 0)
+				  { continue; }
+				
+#ifdef EXDEBUG
+				std::cout << "wl0: " << getLit(wl0) << " wl1: " << getLit(wl1) << " wla: " << getLit(wla) << std::endl;
+#endif
+
+				// At this point either wl0 is unassigned or we have a solution clause
+
+				unsigned int* clause = watches[w]->clause();
+
+				unsigned int pos(0);
+
+				// Try to find a new watched literal within the remainder of "clause".
+				// This loop assumes that "m_assignment[0]" and "m_assignment[1]" are both set to FALSE.
+				// It also assumes that the unassigned universal watch literal is at wl0 ( if existing )
+				while ( ( m_assignment[Lit(clause[pos]) ^ 1] || clause[pos] == wl0 ) && !isPureOrDC(clause[pos]) ) 
+				  { ++pos; }
+
+#ifdef EXDEBUG
+				std::cout << "pos: " << pos << " lit[pos]: " << getLit(clause[pos]) << std::endl;
+#endif
+
+				if( isPureOrDC(clause[pos]) )
+				  {
+#ifdef EXDEBUG
+					std::cout << "skip clause with SPL" << std::endl;
+#endif
+					continue;
+				  }
+
+				// Get the literal checked last.
+				unsigned int lit(clause[pos]); 
+
+				// We are still in the universal part of "clause"? Then we have found a new watched universal literal
+				if( pos < watches[w]->faq() )
+				  {
+					assert( isUniversal(lit) );
+					assert( wl1 != 0 );
+					
+					// Update watching literals positions.
+					watches[w]->wl0 = wl0;
+					watches[w]->wl1 = lit;
+					
+					// watching existential literal - looking for universal watched literal
+					if( wlit == wla )
+					  { 
+						assert( m_assignment[Lit(wl1)^1] );
+
+						q_cubeWatches[Lit(lit)].push_back(watches[w]);
+
+						//remove watches[w] from m_watches[wl1]
+						unsigned int wl1size((unsigned int)q_cubeWatches[Lit(wl1)].size());
+
+						for( unsigned int ws = 0; ws != wl1size; ++ws )
+						  {
+							if( q_cubeWatches[Lit(wl1)][ws]->clause() == clause)
+							  {
+
+#ifdef EXDEBUG
+								std::cout << "swap wl0/wl1 while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wl1) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								q_cubeWatches[Lit(wl1)][ws] = q_cubeWatches[Lit(wl1)][--wl1size];
+								q_cubeWatches[Lit(wl1)].pop_back();
+								break;
+							  }
+						  }
+					  }
+					// watching existential literal - simply remove old literal from watched literal list
+					else
+					  { 
+#ifdef EXDEBUG
+						std::cout << "swap wl0/wl1 while watching wl0/wl1" << std::endl
+								  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+								  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+									
+						// Update "m_watches" for both "wlit" and "lit".
+						q_cubeWatches[Lit(lit)].push_back(watches[w]); 
+						--size;	
+						watches[w] = watches[size];
+						--w;
+						watches.pop_back();
+					  }
+				  }
+				// Are we already at the end of the clause?
+				else if( lit == 0 )
+				  {
+					// At this point, we have either an implication or a conflict.
+					
+					// Conflict?
+					if (m_assignment[Lit(wl0) ^ 1])
+					  { 
+						//BCPSTAT
+						++m_bcpstats[13];
+
+#ifdef DEBUG
+						std::cout << "solution: both univ lits false: " << getLit(wl0) << " " << getLit(wl1) << std::endl;
+#endif 
+						return clause;
+					  }
+					
+					// Implication:
+					// Update watching literals;
+					if( watches[w]->wl0 != wl0 )
+					  {
+						watches[w]->wl0 = wl0;
+						watches[w]->wl1 = wl1;
+					  }
+
+					//BCPSTAT
+					++m_bcpstats[14];
+			      
+					setLearnedUnit(wl0);
+					// Push "wl0" as an implication onto the decision stack.
+					addImplication(wl0, clause); 
+					--cbcpp;
+					return NULL;
+				  }
+				// We are in the existential part of the clause
+				else
+				  {
+					assert( wla != 0 );
+					assert( !isUniversal(lit) );
+
+					// If our universal watch literal is quantified outside wl0 and wl0 is unassigned, we're done
+					if ( !m_assignment[Lit(wl0)^1] && !m_assignment[wla^1] && q_level[wla>>1] < q_level[Lit(wl0)>>1] ) 
+					  { continue; }
+
+					// Is there a existential literal which satisfies the clause?
+					unsigned int upos(pos);
+					while( !m_assignment[Lit(clause[upos])] && clause[upos] != 0 )
+					  { ++upos; }
+
+					// If there is such a literal, we're done, otherwise we have to check "clause[pos]"
+					if( clause[upos] == 0 )
+					  { 
+						// if both existential watches are assigned false, we have a contradiction
+						if( m_assignment[ Lit(wl0)^1 ] && ( m_assignment[ Lit(wl1)^1 ] || wl1 == 0 ) )
+						  {
+							//BCPSTAT
+							++m_bcpstats[13];
+
+#ifdef DEBUG
+							std::cout << "solution: both univ lits false: " << getLit(wl0) << " " << getLit(wl1) << std::endl;
+#endif 
+							return clause;
+						  }
+
+						// at this point wl0 has to be unassigned
+						assert( !m_assignment[Lit(wl0)^1] );
+
+						// new literal found? Watch it!
+						// Due to sorting: if qlevel of "lit" is not smaller than qlevel of "wl0" then there exists no other existential lit with smaller qlevel
+						if( q_level[lit>>1] < q_level[Lit(wl0)>>1] )
+						  {
+							q_cubeWatches[lit].push_back(watches[w]);
+							
+							watches[w]->wla = lit;
+							
+							// Remove "watches[w]" from "m_watches[wla]"
+							// If we proceed already "wla", we can simply remove it from current "watches", 
+							// Otherwise we have to determine the correct "m_watches[wla]"
+							if( wlit == wla )
+							  {
+#ifdef EXDEBUG
+								std::cout << "swap wla while watching wla"<< std::endl
+										  << "remove clause from watchlist of " << getLit(wlit) << std::endl
+										  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+								--size;	
+								watches[w] = watches[size];
+								--w;
+								watches.pop_back();
+							  }
+							else
+							  {
+								unsigned int wlasize((unsigned int)q_cubeWatches[wla].size());
+								for( unsigned int ws = 0; ws != wlasize; ++ws )
+								  {
+									if( q_cubeWatches[wla][ws]->clause() == clause)
+									  {
+#ifdef EXDEBUG
+										std::cout << "swap wla while watching wl0/wl1"<< std::endl
+												  << "remove clause from watchlist of " << getLit(wla) << std::endl
+												  << "add new clause to watchlist of " << getLit(lit) << std::endl;
+#endif
+										q_cubeWatches[wla][ws] = q_cubeWatches[wla][--wlasize];
+										q_cubeWatches[wla].pop_back();
+										break;	
+									  }
+								  }
+							  }
+						  }
+						// no existential literal found? Imply wl0!
+						else
+						  { 
+							assert( !m_assignment[Lit(wl0)^1] );
+
+							if( watches[w]->wl0 != wl0 )
+							  {
+								watches[w]->wl0 = wl0;
+								watches[w]->wl1 = wl1;
+							  }
+
+							//BCPSTAT
+							++m_bcpstats[14];
+
+
+							setLearnedUnit(wl0);
+							addImplication(wl0, clause); 
+							--cbcpp;
+							return NULL;
+						  }
+					  }
+				  }
+			  }
+		  }
+	  }
+	return NULL;
+  }
+}

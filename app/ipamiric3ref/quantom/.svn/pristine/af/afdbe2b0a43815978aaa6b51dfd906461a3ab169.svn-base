@@ -1,0 +1,1025 @@
+#include "core.hpp"
+
+namespace quantom {
+  // Check every nary if it is subsumed by a binary clause
+  // If "selfsubsumption" is true: check also for selfsubsumption with binary clause
+  // Only call at "m_rootLevel" !
+  bool Core::checkSubsumption( bool selfsubsumption )
+  {
+	// Is a nary clause subsumed by a binary clause?
+	// look for two clauses (a,b) and (a,b,c,...)
+	// delete (a,b,c,...)
+
+	if( !q_subsumption )
+	  { return true; }
+
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	assert( m_decisionLevel == m_rootLevel );
+
+	unsigned int dbsize = (unsigned int)m_clauseDatabase.size();
+	unsigned int deleted(0);
+	unsigned int strengthend(0);
+	bool changed(false);
+	bool donotcheck(false);
+	std::vector<unsigned int> watchcandidate;
+	
+	for(unsigned int db = 0; db < dbsize; ++db)
+	  {
+		unsigned int* clause = m_clauseDatabase[db]->clause();
+#ifndef NDEBUG
+		unsigned int wl0 = m_clauseDatabase[db]->wl0;
+		unsigned int wl1 = m_clauseDatabase[db]->wl1;
+#endif
+
+		unsigned int cpos(0);
+		bool subsumed(false);
+
+		while( clause[cpos] != 0 )
+		  {
+			unsigned int checklit = clause[cpos++];
+			const std::vector<unsigned int> watch = m_binWatches[Lit(checklit)];
+
+			//const std::vector<unsigned int> watchlearned = m_binWatchesLearned[Lit(checklit)];
+
+			unsigned int ccpos(0);
+
+			while( clause[ccpos] != 0 )
+			  {
+				unsigned int seclit(clause[ccpos++]);
+
+				if( checklit == seclit )
+				  { continue; }
+	  
+				// find subsumed clause!
+				if( std::find(watch.begin(), watch.end(), seclit ) != watch.end() )
+				  {
+#ifdef DEBUG
+					std::cout << "find candidate!" << std::endl;				
+					printClause(clause);
+					std::cout << " lbd: " << m_clauseDatabase[db]->lbd() << std::endl;
+					std::cout << "bin: " << getLit(checklit) << " " << getLit(seclit) << std::endl;
+#endif
+					// clause currently not forcing another one?
+
+					assert( ( m_forcing[wl0>>1] != clause && m_forcing[wl1>>1] != clause ) ||
+							( m_level[wl0 >> 1] == 0 && m_assignment[wl0] ) ||
+							( m_level[wl1 >> 1] == 0 && m_assignment[wl1] ) );
+					  
+					// delete clause
+#ifdef DEBUG
+					std::cout << "delete clause!" << std::endl;
+#endif
+					deleteClause(db, dbsize, watchcandidate, true);
+					++deleted;
+					subsumed = true;
+				  }
+			  
+				if( subsumed ) break;
+			
+				// find subsumed clause!
+				if( subsumed ) break;
+			  }
+			if( subsumed ) break;
+		  }
+
+		// check for selfsubsumption 
+		// look for two clauses (a,b) and (-a,b,...)
+		// delete (-a,b,...), insert (b,...)
+
+		if ( selfsubsumption && !subsumed )
+		  {
+			changed = false;
+			cpos = 0;
+			unsigned int faq = m_clauseDatabase[db]->faq();
+
+			while( cpos < faq )
+			  {
+				unsigned int ccpos(0);
+				unsigned int checklit = clause[cpos++];
+
+				assert( !isUniversal(checklit) );
+
+				const std::vector<unsigned int> watch = m_binWatches[Lit(checklit)^1];
+				//const std::vector<unsigned int> watchlearned = m_binWatchesLearned[Lit(checklit)^1];
+
+				while( clause[ccpos] != 0 )
+				  {
+					unsigned int seclit(clause[ccpos++]);
+
+					if( checklit == seclit )
+					  { continue; }
+	  
+					// find subsumed clause!
+					if( std::find(watch.begin(), watch.end(), seclit ) != watch.end() )
+					  {
+#ifdef PREDEBUG
+						std::cout << "find candidate!" << std::endl;				
+						printClause(m_clauseDatabase[db]);
+						std::cout << " lbd: " << m_clauseDatabase[db]->lbd() << std::endl;
+						std::cout << "bin: " << getLit(checklit^1) << " " << getLit(seclit) << std::endl;
+#endif
+						// clause currently not forcing another one?
+
+						assert( ( m_forcing[wl0>>1] != clause && m_forcing[wl1>>1] != clause ) ||
+								( m_level[wl0 >> 1] == 0 && m_assignment[wl0] ) ||
+								( m_level[wl1 >> 1] == 0 && m_assignment[wl1] ) );
+					  
+#ifdef PREDEBUG
+						std::cout << "strengthen clause!" << std::endl;
+
+#endif
+						++strengthend;
+						
+						if( !strengthenClauseOld(cpos-1, db, dbsize, watchcandidate, donotcheck ) )
+						  {return false;}
+						cpos = 0;
+						--faq;
+						// did we delete "clause" (introducing new binary clause?
+						// Then don't look at "clause" second time
+						// Otherwise check again
+						changed = true;
+						break;
+					  }
+			  
+					if(donotcheck)
+					  { break; }
+				  }
+				if(donotcheck)
+				  { break; }
+			  }
+			if( changed && !donotcheck ) 
+			  { --db; }
+		  }
+	  }
+
+	// Update Lit Lists
+	updateLitLists( watchcandidate );
+#ifdef OUTPUT
+	std::cout << "sc" << deleted << "sl" << strengthend;
+#endif
+	return true;
+  }
+
+  bool Core::cubeSubsumption( void )
+  {
+#ifdef DEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+#ifdef OUTPUT
+	unsigned int begincubes(m_cubes);
+#endif
+
+	// temporary cube occurence list
+	std::vector< std::vector< pointToClause* > > cubeoccur( (m_variables+1)<<1 );
+		
+	// Sort cubes by variable index, calcsignature and build occurence lists
+	unsigned int solutionsize = q_solutionDatabase.size();
+	for( unsigned int c = 0; c != solutionsize; ++c )
+	  {
+		assert( q_solutionDatabase[c]->sign() != 0 );
+		q_solutionDatabase[c]->sort();
+		unsigned int* cube = q_solutionDatabase[c]->clause();
+
+		unsigned int pos(0);
+		while(cube[pos] != 0 )
+		  { cubeoccur[Lit(cube[pos])].push_back(q_solutionDatabase[c]); ++pos;}
+	  }
+
+	// Now check for every cube if it is subsumed by another cube
+	for( unsigned int c = 0; c != solutionsize; ++c )
+	  {
+		pointToClause* cube = q_solutionDatabase[c];
+
+		assert( cube->lbd() != 0 );
+
+		// Skip cubes forcing literals
+		if( m_forcing[Lit(cube->wl0)>>1] == cube->clause() )
+		  { continue; }
+		
+		// Subsumption Check
+		if( isSubsumedCube( cube, cubeoccur ) )
+		  { 
+			--m_cubes;
+			clearWatchlist( q_solutionDatabase[c], false, true );
+			clearAllOccurences(cube, cubeoccur);
+
+			delete q_solutionDatabase[c];
+			q_solutionDatabase[c--] = q_solutionDatabase[--solutionsize];
+			q_solutionDatabase.pop_back();
+		  }
+	  }
+
+	// Resort cubes
+	for( unsigned int c = 0; c != solutionsize; ++c )
+	  {
+		sortsolvecube( q_solutionDatabase[c] );
+		assert( !isUniversal(q_solutionDatabase[c]->clause()[q_solutionDatabase[c]->faq()]) || 
+				q_solutionDatabase[c]->clause()[q_solutionDatabase[c]->faq()] == 0 );
+	  }
+
+#ifdef DEBUG
+	std::cout << "after subsumption" << std::endl;
+	for( unsigned int v = 1; v <= m_variables; ++v )
+	  {
+		if( m_forcing[v] != NULL && isUniversal(m_forcing[v][0]) )
+		  {
+			std::cout << v << " forced by cube: " << std::endl;
+			printClause(m_forcing[v]);
+			std::cout << std::endl;
+		  }
+	  }
+#endif
+	
+#ifdef OUTPUT
+	std::cout << "SubC" << (begincubes-m_cubes);
+#endif
+	return true;
+  }
+
+  bool Core::isSubsumedCube( pointToClause* ptc, std::vector< std::vector< pointToClause* > >& cubeoccur )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " of ";
+	printClause(ptc);
+#endif
+
+	unsigned int* cube = ptc->clause();
+	unsigned int pos(0);
+
+	unsigned int sign = ptc->sign();
+	unsigned int size = ptc->size();
+
+	// check if another nary clause subsumes "clause"
+	while( cube[pos] != 0 )
+	  {
+		std::vector< pointToClause* > occur = cubeoccur[Lit(cube[pos])];
+		
+		unsigned int osize = (unsigned int)occur.size();
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			/* skip if:
+			   clause is current clause
+			   clause has the same size
+			   clause has been marked as deleted
+			   clause's signature doesn't fit
+			*/
+			if( ( occur[j] == ptc ) || 
+				( occur[j]->size() > size ) ||
+				( occur[j]->lbd() == 0 ) ||
+				( ( occur[j]->sign() & ~sign ) != 0 )
+				)
+			  { continue; }
+
+			unsigned int c = 0;
+			unsigned int s = 0;
+
+			while( ( c != occur[j]->size() ) && 
+				   ( s != size ) && 
+				   ( ( occur[j]->size() - c ) <= ( size - s ) ) )
+			  {
+				if( occur[j]->clause()[c] == cube[s] )
+				  {
+					++c;
+					++s;
+				  }
+				else if( occur[j]->clause()[c] > cube[s] )
+				  {
+					++s;
+				  }
+				else
+				  {
+					return false;
+				  }
+			  }
+
+			if( c != occur[j]->size() )
+			  {
+				return false;
+			  }
+
+#if 0
+			if( m_forcing[Lit(ptc->wl0)>>1] == ptc->clause() )
+			  {
+				m_forcing[Lit(ptc->wl0)>>1] = occur[j]->clause();
+
+#ifdef DEBUG
+				std::cout << "new forcing clause for: " << getLit(ptc->wl0) << " old clause: ";
+				printClause(ptc);
+				std::cout << "new clause before change: ";
+				printClause(occur[j]);
+#endif
+				
+				// set "wl0" to the forcing lit
+				if( occur[j]->wl1 == ptc->wl0 )
+				  { 
+#ifdef DEBUG
+					std::cout << "swap wl0 and wl1: " << getLit(occur[j]->wl0) << " " << getLit(occur[j]->wl1) << std::endl;
+#endif
+					// swap "wl1" and "wl0"
+					occur[j]->wl1 = occur[j]->wl0; 
+					occur[j]->wl0 = ptc->wl0;
+				  }
+				else if ( occur[j]->wl0 != ptc->wl0 )
+				  {
+#ifdef DEBUG
+					std::cout << "new watchlit, remove old: " << getLit(occur[j]->wl0) << std::endl; 
+#endif
+					// The new watchlit is neither "wl0" nor "wl1" -> remove old "wl0" and set new "wl0"
+					removeWatchlit( q_cubeWatches[Lit(occur[j]->wl0)], occur[j] );
+					occur[j]->wl0 = ptc->wl0;
+					q_cubeWatches[Lit(occur[j]->wl0)].push_back( occur[j] );
+				  }
+
+#ifdef DEBUG
+				std::cout << "after change: ";
+				printClause(occur[j]);
+#endif
+
+			  }
+#endif
+
+#ifdef DEBUG
+			printClause(occur[j]->clause());
+			std::cout << " subsumes " << std::endl;
+			printClause(cube);
+			std::cout << std::endl;
+#endif
+			return true;
+		  }
+		++pos;
+	  }
+	return false;
+  }
+
+  /* Preprocessor methods */
+
+  bool Core::subsumptionCheck( unsigned int& didsomething /*, bool full*/ )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+	printdatabase();
+#endif
+
+	unsigned int tmpsub = q_subsumptions;
+	unsigned int tmpselfsub = q_selfsubsumptions;
+
+	for( unsigned int i = 1; i <= m_variables; ++i )
+	  {
+		if( q_level[i] == 0 || q_deleted[i] )
+		  { continue; }
+
+#ifdef PREDEBUG
+		std::cout << "var: " << i << std::endl;
+		std::cout << "check bins" << std::endl;
+#endif
+
+		unsigned int poslit = i<<1;
+		unsigned int neglit = (i<<1)^1;
+
+		unsigned int bsize = (unsigned int)m_binWatches[poslit].size();
+		for( unsigned int j = 0; j != bsize; ++j )
+		  {
+			bool islearned( j >= m_binWatchesLearnedIndex[poslit]);
+			if ( !checkBinSub( getUniFlag(poslit), m_binWatches[poslit][j], islearned ) )
+			  { return false; }
+		  }
+
+		bsize = (unsigned int)m_binWatches[neglit].size();
+		for( unsigned int j = 0; j != bsize; ++j )
+		  {
+			bool islearned( j >= m_binWatchesLearnedIndex[neglit]);
+			if( !checkBinSub( getUniFlag(neglit), m_binWatches[neglit][j], islearned ) )
+			  { return false; }
+		  }
+	  }
+
+#ifdef PREDEBUG
+	std::cout << "check naries" << std::endl;
+#endif
+	
+	
+	if( m_clauseDatabase.size() <= 100000 )
+	  {
+
+#if 0
+		std::sort( m_clauseDatabase.begin(), m_clauseDatabase.end(), compareSizeReverse);
+#else 
+		std::sort( m_clauseDatabase.begin(), m_clauseDatabase.end(), compareSize);
+#endif
+
+		std::vector< pointToClause* > subsumedclauses;
+
+		// Sort occurence lists for fast subsumption checks
+		for( unsigned int v = 1; v <= m_variables; ++v )
+		  {
+			std::sort( q_occur[v<<1].begin(), q_occur[v<<1].end(), compareID );
+			std::sort( q_occur[(v<<1)^1].begin(), q_occur[(v<<1)^1].end(), compareID );
+		  }
+
+		// Now check for every n-nary, if the clause is self-subsuming or subsumed by another n-nary clause
+		for( unsigned int c = 0; c != m_clauseDatabase.size(); ++c )
+		  {
+#if 0
+			if( !full && ( c >= (m_clauseDatabase.size()>>1) ) )
+			  { break; }
+#endif
+
+			pointToClause* clause = m_clauseDatabase[c];
+
+			// Already marked as deleted?
+			if( clause->lbd() == 0 )
+			  { continue; }
+
+#if 0
+			// Subsumption Check
+			if( isSubsumed( clause ) )
+			  { 
+				clearAllOccurences( clause ); 
+			  }
+#else
+			backwardSubsumption( clause, subsumedclauses );
+#endif
+		  }
+
+#if 1
+		// delete all subsumed clauses
+		for( std::vector< pointToClause* >::const_iterator it = subsumedclauses.begin(); it != subsumedclauses.end(); ++it )
+		  {
+			clearAllOccurences(*it);
+		  }
+#endif
+	  }
+
+	if( ( (q_subsumptions - tmpsub) > 0 ) || ( (q_selfsubsumptions - tmpselfsub) > 0 ) )
+	  { didsomething |= 0x2; }
+	
+	if( m_control->getVerbosity() > 1 )
+	  {
+		std::cout << "c subsumptions: " << (q_subsumptions - tmpsub) << std::endl
+				  << "c selfsubsumptions: " << (q_selfsubsumptions - tmpselfsub) << std::endl;
+	  }
+	return true;
+  }
+
+
+  // Is "clause" subsumed by some clause in database?
+  // Assumes that "clause" is sorted
+  bool Core::isForwardSubsumed( const std::vector< unsigned int >& clause, unsigned int sign ) const
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int csize( clause.size() );
+	// Check binaries first
+	for( unsigned int i = 0; i != csize; ++i )
+	  {
+		unsigned int bsize( m_binWatches[Lit(clause[i])].size() );
+		for( unsigned int j = 0; j != bsize; ++j )
+		  {
+			unsigned int seclit( m_binWatches[Lit(clause[i])][j] );
+			unsigned long long binsign( ( 1ULL << (clause[i] % 64)) | 1ULL << (seclit % 64) );
+		
+			// subsumption candidate!2
+			if( ( binsign & ~sign ) == 0 )
+			  {
+				unsigned int k( 0 );
+				while( ( k < csize ) && ( clause[k] < seclit ) )
+				  { ++k; }
+				// Subsumption found!
+				if( ( k < csize ) && ( clause[k] == seclit ) )
+				  { 
+					return true; 
+				  }
+			  }
+		  }
+	  }
+
+	// Check n-naries
+	return isSubsumed(clause, clause.size(), sign);
+  }
+
+  bool Core::cubeIsForwardSubsumed( const std::vector< unsigned int >& cube, unsigned int sign, const std::vector< std::vector< pointToClause* > >& cubeoccur ) const
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	unsigned int csize( cube.size() );
+
+	// check if another nary clause subsumes "clause"
+	for( unsigned int i = 0; i != csize; ++i )
+	  {
+		const std::vector< pointToClause* >& occur = cubeoccur[Lit(cube[i])];
+		
+		unsigned int osize = (unsigned int)occur.size();
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			/* skip if:
+			   cube has the same size
+			   cube has been marked as deleted
+			   cube's signature doesn't fit
+			*/
+			if( ( occur[j]->size() > cube.size() ) ||
+				( occur[j]->lbd() == 0 ) ||
+				( ( occur[j]->sign() & ~sign ) != 0 )
+				)
+			  { continue; }
+			
+			unsigned int c = 0;
+			unsigned int s = 0;
+
+			while( ( c != occur[j]->size() ) && 
+				   ( s != cube.size() ) && 
+				   ( ( occur[j]->size() - c ) <= ( cube.size() - s ) ) )
+			  {
+				if( occur[j]->clause()[c] == cube[s] )
+				  {
+					++c;
+					++s;
+				  }
+				else if( occur[j]->clause()[c] > cube[s] )
+				  {
+					++s;
+				  }
+				else
+				  {
+					return false;
+				  }
+			  }
+
+			if( c != occur[j]->size() )
+			  {
+				return false;
+			  }
+
+#ifdef PREDEBUG
+			printClause(occur[j]->clause());
+			std::cout << " subsumes " << std::endl;
+			printClause(cube);
+			std::cout << std::endl;
+#endif
+			return true;
+		  }
+	  }
+	return false;
+  }
+
+  bool Core::isSubsumed( const std::vector< unsigned int >& clause, const unsigned int& size, const unsigned int& sign ) const 
+  {
+
+#ifdef PREDEBUG
+	std::cout << __func__ << std::endl;
+#endif
+
+	// check if another nary clause subsumes "clause"
+	for( unsigned int i = 0; i != size; ++i )
+	  {
+		const std::vector< pointToClause* >& occur = q_occur[Lit(clause[i])];
+		
+		unsigned int osize = (unsigned int)occur.size();
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			/* skip if:
+			   clause has the same size
+			   clause has been marked as deleted
+			   clause's signature doesn't fit
+			*/
+			if( ( occur[j]->size() > clause.size() ) ||
+				( occur[j]->lbd() == 0 ) ||
+				( ( occur[j]->sign() & ~sign ) != 0 )
+				)
+			  { continue; }
+			
+			unsigned int c = 0;
+			unsigned int s = 0;
+
+			while( ( c != occur[j]->size() ) && 
+				   ( s != clause.size() ) && 
+				   ( ( occur[j]->size() - c ) <= ( clause.size() - s ) ) )
+			  {
+				if( occur[j]->clause()[c] == clause[s] )
+				  {
+					++c;
+					++s;
+				  }
+				else if( occur[j]->clause()[c] > clause[s] )
+				  {
+					++s;
+				  }
+				else
+				  {
+					break;
+				  }
+			  }
+
+			if( c != occur[j]->size() )
+			  {
+				continue;
+			  }
+
+#ifdef PREDEBUG
+			printClause(occur[j]);
+			std::cout << "subsumes" << std::endl;
+			printClause(clause);
+			std::cout << std::endl;
+#endif
+			return true;
+		  }
+	  }
+	return false;
+  }
+
+  bool Core::isSubsumed( pointToClause* ptc )
+  {
+#ifdef PREDEBUG
+	std::cout << "check whether ";
+	printClause(ptc);
+	std::cout <<  __func__ << std::endl;
+#endif
+
+	unsigned int* clause = ptc->clause();
+	unsigned int pos(0);
+
+	unsigned int sign = ptc->sign();
+	unsigned int size = ptc->size();
+
+	// check if another nary clause subsumes "clause"
+	while( clause[pos] != 0 )
+	  {
+		std::vector< pointToClause* > occur = q_occur[Lit(clause[pos])];
+		
+		unsigned int osize = (unsigned int)occur.size();
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			/* skip if:
+			   clause is current clause
+			   clause has the same size
+			   clause has been marked as deleted
+			   clause's signature doesn't fit
+			*/
+			if( ( occur[j] == ptc ) || 
+				( occur[j]->size() > size ) ||
+				( occur[j]->lbd() == 0 ) ||
+				( ( occur[j]->sign() & ~sign ) != 0 )
+				)
+			  { continue; }
+
+			unsigned int c = 0;
+			unsigned int s = 0;
+
+			while( ( c != occur[j]->size() ) && 
+				   ( s != size ) && 
+				   ( ( occur[j]->size() - c ) <= ( size - s ) ) )
+			  {
+				if( occur[j]->clause()[c] == clause[s] )
+				  {
+					++c;
+					++s;
+				  }
+				else if( occur[j]->clause()[c] > clause[s] )
+				  {
+					++s;
+				  }
+				else
+				  {
+					break;
+				  }
+			  }
+
+			if( c != occur[j]->size() )
+			  {
+				continue;
+			  }
+
+			++q_subsumptions;
+#ifdef PREDEBUG
+			std::cout << "is subsumed by" << std::endl;
+			printClause(occur[j]);
+#endif
+			// Change role of subsumer clause to static, if subsumed clause was static
+			if( ptc->lbd() == 1 )
+			  { 
+				occur[j]->setLBD(1); 
+#ifdef DEBUG
+				std::cout << "changed lbd value of ";
+				printClause(occur[j]);
+#endif
+			  }
+
+			return true;
+		  }
+		++pos;
+	  }
+	return false;
+  }
+
+
+  // Adds the set of clauses, which is subsumed by "clause", to "subsumedclauses"
+  void Core::backwardSubsumption( pointToClause* clause, std::vector< pointToClause* >& subsumedclauses )
+  {
+#ifdef PREDEBUG
+	std::cout <<  __func__ << " of " << std::endl;
+	printClause(clause);
+#endif
+
+	std::vector< pointToClause* > nextclauseset;
+	unsigned int* lits( clause->clause() );
+	unsigned int pos(0);
+
+	std::vector< pointToClause* > clauseset = q_occur[Lit(lits[pos])];
+	++pos;
+
+	unsigned int p(0);
+	unsigned int q(0);
+	for( ; p != clauseset.size(); ++p )
+	  {
+		// delete "clause" from "clauseset"
+		if( clauseset[p] != clause )
+		  { clauseset[q] = clauseset[p]; ++q; }
+	  }
+	assert( q == ( p-1 ) );
+	clauseset.pop_back();
+
+	while( lits[pos] != 0 )
+	  {
+		std::vector< pointToClause* >::iterator dbit = clauseset.begin();
+		std::vector< pointToClause* >::iterator ocit = q_occur[Lit(lits[pos])].begin();
+
+#ifdef PREDEBUG
+		std::cout << "lit: " << getLit(lits[pos]) << " occurlist: " << std::endl;
+		printOccur(lits[pos]);
+		std::cout << "clauseset: " << std::endl;
+		for( unsigned int foo = 0; foo != clauseset.size(); ++foo )
+		  { 
+			std::cout << foo << ": ";
+			printClause(clauseset[foo]); 
+		  }
+#endif
+
+		// Build intersection between all clauses and occurence list of "lits[pos]"
+		while( dbit != clauseset.end() && ocit != q_occur[Lit(lits[pos])].end() )
+		  {
+			if( (*dbit)->isDeleted() )
+			  { ++dbit; }
+			else if( (*ocit)->isDeleted() )
+			  { ++ocit; }
+			else if( (*dbit)->id() < (*ocit)->id() )
+			  { ++dbit; }
+			else 
+			  {
+				if( !( (*ocit)->id() < (*dbit)->id() ) )
+				  {
+					assert( (*ocit) == (*dbit) );
+					nextclauseset.push_back(*dbit);
+				  }
+				++ocit;
+			  }
+		  }
+
+		clauseset = nextclauseset;
+
+#ifdef PREDEBUG
+		std::cout << "nextclauseset: " << std::endl;
+		for( unsigned int foo = 0; foo != clauseset.size(); ++foo )
+		  { 
+			std::cout << foo << ": ";
+			printClause(clauseset[foo]); 
+		  }
+#endif
+
+		// If intersection is empty, we are done
+		if( clauseset.empty() )
+		  { break; }
+
+		nextclauseset.clear();
+		++pos;
+	  }
+
+	q_subsumptions += clauseset.size();
+
+#ifdef PREDEBUG
+	if( !clauseset.empty() )
+	  { 
+		printClause(clause);
+		std::cout << "subsumes: " << std::endl;
+	  }
+#endif
+	// Add new clauses in intersection to overall list
+	for( unsigned int i = 0; i != clauseset.size(); ++i )
+	  {
+		assert( clauseset[i]->lbd() != 0 );
+#ifdef PREDEBUG
+		printClause( clauseset[i] );
+#endif		
+		// Change role of subsumer clause to static, if subsumed clause was static
+		if( clauseset[i]->lbd() == 1 )
+		  { 
+			clause->setLBD(1); 
+#ifdef PREDEBUG
+			std::cout << "changed lbd value of ";
+			printClause(clause);
+#endif
+		  }
+
+		clauseset[i]->setLBD(0);
+		subsumedclauses.push_back(clauseset[i]);
+	  }
+  }
+
+
+  bool Core::subsuming( pointToClause* ptc )
+  {
+#ifdef PREDEBUG
+	std::cout << "check whether ";
+	printClause(ptc);
+	std::cout <<  __func__ << std::endl;
+#endif
+
+	unsigned int* clause = ptc->clause();
+	unsigned int pos(0);
+
+	unsigned int sign = ptc->sign();
+	unsigned int size = ptc->size();
+
+	// check if another nary clause subsumes "clause"
+	while( clause[pos] != 0 )
+	  {
+		std::vector< pointToClause* > occur = q_occur[Lit(clause[pos])];
+		
+		unsigned int osize = (unsigned int)occur.size();
+		for( unsigned int j = 0; j != osize; ++j )
+		  {
+			/* skip if:
+			   clause is current clause
+			   clause has the same size
+			   clause has been marked as deleted
+			   clause's signature doesn't fit
+			*/
+			if( ( occur[j] == ptc ) || 
+				( occur[j]->size() < size ) ||
+				( occur[j]->lbd() == 0 ) ||
+				( ( occur[j]->sign() & ~sign ) != 0 )
+				)
+			  { continue; }
+
+			unsigned int c = 0;
+			unsigned int s = 0;
+
+			while( ( c != occur[j]->size() ) && 
+				   ( s != size ) && 
+				   ( ( occur[j]->size() - c ) <= ( size - s ) ) )
+			  {
+				if( occur[j]->clause()[c] == clause[s] )
+				  {
+					++c;
+					++s;
+				  }
+				else if( occur[j]->clause()[c] > clause[s] )
+				  {
+					++s;
+				  }
+				else
+				  {
+					break;
+				  }
+			  }
+
+			if( c != occur[j]->size() )
+			  {
+				continue;
+			  }
+
+			++q_subsumptions;
+#ifdef PREDEBUG
+			std::cout << "clause subsumes: " << std::endl;;
+			printClause(occur[j]);
+#endif
+			// Change role of subsumer clause to static, if subsumed clause was static
+			if( occur[j]->lbd() == 1 )
+			  { 
+				ptc->setLBD(1); 
+#ifdef DEBUG
+				std::cout << "changed lbd value of ";
+				printClause(ptc);
+#endif
+			  }
+
+			clearAllOccurences(occur[j]);
+		  }
+		++pos;
+	  }
+	return false;
+  }
+
+  // mark all nary clauses which are subsumed by the binary "i1 i2"
+  bool Core::checkBinSub( unsigned int i1, unsigned int i2, bool islearned )
+  {
+#ifdef PREDEBUG
+	std::cout << __func__ << " of " << getLit(i1) << " " << getLit(i2) << std::endl;
+#endif
+	unsigned long long sign(0);
+	sign |= 1ULL << ((i1>>1) % 64);
+	sign |= 1ULL << ((i2>>1) % 64);
+	
+	unsigned int checklit = i1;
+	unsigned int seclit = i2;
+
+	unsigned int size = (unsigned int)q_occur[Lit(checklit)].size();
+#ifdef PREDEBUG
+	std::cout << "checklit: " << getLit(checklit) << " seclit: " << getLit(seclit) << " size: " << size << std::endl;
+#endif
+
+	for( unsigned int i = 0; i != size; ++i)
+	  {
+
+		pointToClause* ptc = q_occur[Lit(checklit)][i];
+
+#ifdef PREDEBUG
+		std::cout << "check " << i << ": ";
+		printClause(q_occur[Lit(checklit)][i]);
+		std::cout << "binsign: " << std::hex << sign << " clause sign: " << ptc->sign() << " " << (sign & ~ptc->sign()) << std::dec << std::endl;
+#endif
+
+		if( ( sign & ~ptc->sign() ) != 0 )
+		  { continue; }
+
+		if( ptc->lbd() == 0 )
+		  { continue; }
+
+		unsigned int p(0);
+
+		unsigned int* clause = ptc->clause();
+
+		while( clause[p] != 0 ) 
+		  {
+#if 1
+			// "clause" is self-subsuming with ( i1 + i2 )
+			if( ( clause[p] == (seclit^1) ) && !m_donttouch[Lit(seclit)>>1] )
+			  { 
+
+				if( islearned != (ptc->lbd() > 1 ) )
+				  { ++p; continue; }
+
+#ifdef PREDEBUG
+				std::cout << "selfsubsumption with literal " << getLit(seclit) << std::endl;
+#endif
+			
+				// If we have deleted the n-nary clause, we have to update the status variables
+				if ( strengthenClause( ptc, seclit^1, false ) )
+				  { --size; --i; }
+
+				if( ptc->size() == 0 )
+				  { return false; }
+
+				++q_selfsubsumptions;
+			  }
+#endif
+			// "clause" is subsumed by ( i1 + i2 )
+			if( clause[p] == seclit )
+			  { 
+				++q_subsumptions;
+
+#ifdef PREDEBUG
+				printClause(ptc);
+				std::cout << "is subsumed by binary: " << getLit(i1) << " " << getLit(i2) << std::endl;
+#endif
+
+				unsigned int pos(0);
+				while( clause[pos] != 0 )
+				  {
+					if( clause[pos] != checklit )
+					  { removeFromOccurenceList( clause[pos], ptc ); }
+					++pos;
+				  }
+
+				// Do we have to change the role of a dynamic learned binary to a static learned binary?
+				if( ( ptc->lbd() == 1 ) && islearned )
+				  { 
+#ifdef PREDEBUG
+					std::cout << "change role of dynamic binary " << getLit(checklit) << " " << getLit(seclit) << std::endl;
+#endif
+					swapBinary( checklit, seclit );
+					swapBinary( seclit, checklit );
+					islearned = false;
+				  }
+
+				ptc->setLBD(0);
+
+				assert( size == q_occur[Lit(checklit)].size() );
+
+				q_occur[Lit(checklit)][i--] = q_occur[Lit(checklit)][--size];
+				q_occur[Lit(checklit)].pop_back();
+				break;
+			  }
+			++p;
+		  }
+	  }
+	return true;
+  }
+
+}

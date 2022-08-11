@@ -1,0 +1,22 @@
+SUBDIRS = include source
+
+#ACLOCAL_AMFLAGS = -I m4
+
+clean-local:
+	rm -r -f *~
+
+distclean-local: 	
+	rm -r -f *~
+	rm -r -f aclocal.m4
+	rm -r -f autom4te.cache 
+	rm -r -f config.guess
+	rm -r -f config.sub
+	rm -r -f configure 
+	rm -r -f depcomp
+	rm -r -f install-sh
+	rm -r -f ltmain.sh 
+	rm -r -f missing 
+	rm -r -f Makefile.in 
+	rm -r -f COPYING
+	rm -r -f INSTALL
+	rm -r -f mkinstalldirs

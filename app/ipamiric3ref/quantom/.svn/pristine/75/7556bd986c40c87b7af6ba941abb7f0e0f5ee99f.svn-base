@@ -1,0 +1,28 @@
+initially run:
+
+./make_prepare
+
+(needs linux autoinstall package)
+
+then:
+
+make
+
+
+for static linked version:
+
+./make_static
+
+(needs usual "make" in advance)
+
+
+Resulting binary is put into:
+
+source/quantom
+
+
+Type:
+
+./quantom --help
+
+for usage
