@@ -12,7 +12,7 @@ TARGET=$(shell basename "`pwd`")
 # 'minisat220' as the SAT solver.
 #--------------------------------------------------------------------------#
 
-IPAMIRSOLVER ?= maxhs
+IPAMIRSOLVER ?= solver2022
 IPASIRSOLVER ?= minisat220
 
 #--------------------------------------------------------------------------#

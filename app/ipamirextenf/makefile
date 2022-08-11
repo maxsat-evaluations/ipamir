@@ -13,7 +13,7 @@ TARGET=$(shell basename "`pwd`")
 #--------------------------------------------------------------------------#
 
 IPASIRSOLVER ?= minisat220
-IPAMIRSOLVER ?= maxhs
+IPAMIRSOLVER ?= solver2022
 
 #--------------------------------------------------------------------------#
 # Compiler flags and library dependencies.
