@@ -1,0 +1,1 @@
+-pthread -lgmp -L../../sat/cominisatps/ -lipasircominisatps 
