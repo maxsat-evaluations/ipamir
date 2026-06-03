@@ -20,8 +20,9 @@ TARGET=libipamir$(SIG)scip.a
 
 #-----------------------------------------------------------------------#
 
-CC=g++
-CFLAGS=-Wall -DNDEBUG -O3 -std=c++11
+CC=gcc
+CFLAGS=-Wall -DNDEBUG -O3 -std=c11
+CXXFLAGE=-std=c++11
 
 #-----------------------------------------------------------------------#
 #- REQUIRED TOP RULES --------------------------------------------------#
@@ -46,8 +47,9 @@ $(SCIP):
 $(SCIP)/build/lib/libscip.a: $(SCIP)
 	cd $(SCIP); \
 	sed -i "s/add_library(libscip/add_library(libscip STATIC/g" scip/src/CMakeLists.txt; \
+	sed -i -e "/primes = base.primes/d" -e "/primes(base.primes)/d" soplex/src/soplex/datahashtable.h; \
 	mkdir build; cd build; \
-	cmake -DNO_EXTERNAL_CODE=on -DSOPLEX=on -DTPI=tny .. ; \
+	cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DNO_EXTERNAL_CODE=on -DSOPLEX=on -DTPI=tny .. ; \
 	make libscip
 
 ../../sat/cominisatps/libipasircominisatps.a:

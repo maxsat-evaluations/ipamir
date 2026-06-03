@@ -21,6 +21,7 @@
 #ifndef AF_INSTANCE_H
 #define AF_INSTANCE_H
 
+#include <cstdint>
 #include <vector>
 #include <unordered_map>
 #include <string>

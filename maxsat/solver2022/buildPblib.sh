@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 die () {
   echo "*** buildPblib.sh: $*" 1>&2
@@ -31,6 +31,6 @@ tar xvf pblib.tar.gz
 
 msg "Building PBLib"
 cd pblib
-cmake -Wno-dev .
+cmake -Wno-dev -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .
 make
 cd ..

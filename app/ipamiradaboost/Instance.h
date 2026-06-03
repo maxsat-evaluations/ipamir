@@ -21,6 +21,7 @@
 #ifndef DT_INSTANCE_H
 #define DT_INSTANCE_H
 
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <cassert>

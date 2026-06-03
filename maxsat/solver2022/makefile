@@ -15,8 +15,8 @@ TARGET=libipamir$(SIG).a
 
 #-----------------------------------------------------------------------#
 
-CC=g++
-CFLAGS=-Wall -DNDEBUG -O3 -std=c++17
+CC=gcc
+CFLAGS=-Wall -DNDEBUG -O3 -std=gnu17
 
 #-----------------------------------------------------------------------#
 #- REQUIRED TOP RULES --------------------------------------------------#
@@ -45,7 +45,7 @@ LINK	=	$(shell	if [ -f ../../sat/$(IPASIRSOLVER)/LINK ]; \
 			fi)
 
 pblib/libpblib.a:
-	./buildPblib.sh
+	bash buildPblib.sh
 
 ipamir$(NAME)glue.o: ipamir$(NAME)glue.cc ipamir.h ipasir.h makefile pblib/libpblib.a
 	$(CC) $(CFLAGS) -c ipamir$(NAME)glue.cc

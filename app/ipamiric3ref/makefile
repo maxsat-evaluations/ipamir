@@ -14,8 +14,8 @@ LIBS += $(shell cat ../../maxsat/$(IPASIRSOLVER)/LIBS 2>/dev/null)
 
 all:	$(TARGET)
 
-$(TARGET):	minisat/build/dynamic/lib/libminisat.so aiger/aiger.o Model.o IC3.o PoGeneralizer.o main.o
-	$(CXX) $(CFLAGS) $(INCLUDE) -o $(TARGET) \
+$(TARGET):	minisat/build/release/lib/libminisat.a aiger/aiger.o Model.o IC3.o PoGeneralizer.o main.o
+	$(CXX) -o $(TARGET) \
 		aiger.o Model.o IC3.o PoGeneralizer.o main.o \
 		minisat/build/release/lib/libminisat.a \
 		quantom/libquantom.a \
@@ -24,7 +24,8 @@ $(TARGET):	minisat/build/dynamic/lib/libminisat.so aiger/aiger.o Model.o IC3.o P
 		aigqbf/libaigsolve-cpp-all.a \
 		../../maxsat/$(IPAMIRSOLVER)/libipamir$(IPAMIRSOLVER).a $(LIBS)
 
-
+minisat/build/release/lib/libminisat.a:
+	make -C minisat lr
 
 .c.o:
 	$(CC) -g -O3 $(INCLUDE) $< -c

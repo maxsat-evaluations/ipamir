@@ -48,3 +48,26 @@ Thumbs.db
 *.mov
 *.wmv
 
+*.o
+*.a
+*.d
+*.or
+**/result
+**/build/
+
+app/ipamiradaboost/ipamiradaboost
+app/ipamirapp/ipamirapp
+app/ipamirbioptsat/ipamirbioptsat
+app/ipamirextenf/ipamirextenf
+app/ipamiric3ref/ipamiric3ref
+app/ipamirmlicseesaw/ipamirmlicseesaw
+
+!app/ipamiric3ref/aigqbf/libaigsolve-cpp-all.a
+!app/ipamiric3ref/depqbf/libqdpll.a
+!app/ipamiric3ref/pacose/libPacose.a
+!app/ipamiric3ref/quantom/libquantom.a
+
+maxsat/uwrmaxsat14scip/scipoptsuite-8.0.0/
+maxsat/solver2022/pblib/
+
+sat/cominisatps/cominisatps
