@@ -32,6 +32,7 @@
               buildInputs = [ pkgs.zlib ];
             }
             { name = "ipamiric3ref"; }
+            { name = "ipamirwcnfi"; }
           ];
           solvers = [
             {
