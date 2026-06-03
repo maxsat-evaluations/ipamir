@@ -88,6 +88,10 @@
                 cp maxsat/uwrmaxsat14scip/scipoptsuite-8.0.0/build/lib/*.a $out/lib/
               '';
             }
+            {
+              name = "Aperture";
+              buildInputs = [ pkgs.zlib ];
+            }
           ];
         in
         (builtins.listToAttrs (
