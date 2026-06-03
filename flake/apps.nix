@@ -33,6 +33,7 @@
             }
             { name = "ipamiric3ref"; }
             { name = "ipamirwcnfi"; }
+            { name = "ipamirsibyltrace"; }
           ];
           solvers = [
             {
