@@ -1,0 +1,1 @@
+-L../../maxsat/share-trail/./third_party/jemalloc/lib -ljemalloc -lpthread -ldl -lglucose41

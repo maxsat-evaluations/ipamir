@@ -92,6 +92,27 @@
               name = "Aperture";
               buildInputs = [ pkgs.zlib ];
             }
+            {
+              name = "core-trail";
+              buildInputs = [
+                pkgs.autoconf
+                pkgs.zlib
+              ];
+              postInstall = ''
+                cp maxsat/core-trail/third_party/jemalloc/lib/*.a $out/lib/
+              '';
+            }
+            {
+              name = "share-trail";
+              buildInputs = [
+                pkgs.autoconf
+                pkgs.zlib
+              ];
+              postInstall = ''
+                cp maxsat/share-trail/third_party/jemalloc/lib/*.a $out/lib/
+                cp maxsat/share-trail/libglucose41.a $out/lib/
+              '';
+            }
           ];
         in
         (builtins.listToAttrs (

@@ -1,0 +1,1 @@
+-L../../maxsat/core-trail/./third_party/jemalloc/lib -ljemalloc -lpthread -ldl
