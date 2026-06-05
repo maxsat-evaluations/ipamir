@@ -15,3 +15,7 @@ The application can be run on a trace file as follows:
 ```
 ./ipamirsibyltrace <trace_file.wcnf>
 ```
+
+# Inputs
+
+The inputs can be downloaded [here](https://www.cs.helsinki.fi/group/coreo/MSE2026/sibyltrace-inputs.zip).
