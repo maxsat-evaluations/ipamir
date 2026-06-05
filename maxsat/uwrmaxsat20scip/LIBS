@@ -1,0 +1,1 @@
+ -L../../maxsat/uwrmaxsat20scip/cadical/build -lcadical -L../../maxsat/uwrmaxsat20scip/scipoptsuite-10.0.2/build/lib -lscip -lsoplex-pic -pthread -lmpfr -lgmp

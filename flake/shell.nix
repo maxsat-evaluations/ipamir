@@ -9,6 +9,7 @@
           gmp
           gnumake
           just
+          mpfr
           unzip
           zlib
         ];

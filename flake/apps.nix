@@ -124,6 +124,22 @@
                 cp maxsat/uwrmaxsat20/cadical/build/libcadical.a $out/lib/
               '';
             }
+            {
+              name = "uwrmaxsat20scip";
+              buildInputs = with pkgs; [
+                gmp
+                mpfr
+                zlib
+              ];
+              nativeBuildInputs = with pkgs; [
+                cmake
+                unzip
+              ];
+              postInstall = ''
+                cp maxsat/uwrmaxsat20scip/cadical/build/libcadical.a $out/lib/
+                cp maxsat/uwrmaxsat20scip/scipoptsuite-10.0.2/build/lib/*.a $out/lib/
+              '';
+            }
           ];
         in
         (builtins.listToAttrs (
@@ -136,8 +152,9 @@
                 [
                   "ipamir.h"
                   "ipasir.h"
-                  "maxsat"
-                  "maxsat/${solver.name}.*"
+                  "maxsat$"
+                  "maxsat/${solver.name}$"
+                  "maxsat/${solver.name}/.*"
                 ]
                 ++ lib.optionals (builtins.hasAttr "sourceRegex" solver) solver.sourceRegex
               );
