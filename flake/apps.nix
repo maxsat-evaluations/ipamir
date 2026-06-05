@@ -113,6 +113,17 @@
                 cp maxsat/share-trail/libglucose41.a $out/lib/
               '';
             }
+            {
+              name = "uwrmaxsat20";
+              buildInputs = with pkgs; [
+                gmp
+                zlib
+              ];
+              nativeBuildInputs = [ pkgs.unzip ];
+              postInstall = ''
+                cp maxsat/uwrmaxsat20/cadical/build/libcadical.a $out/lib/
+              '';
+            }
           ];
         in
         (builtins.listToAttrs (
