@@ -8,8 +8,10 @@
           cmake
           gmp
           gnumake
+          gnuplot
           just
           mpfr
+          nushell
           unzip
           zlib
         ];
