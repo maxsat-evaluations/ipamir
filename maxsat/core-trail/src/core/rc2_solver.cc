@@ -1398,6 +1398,15 @@ bool RC2StratifiedSolver::compute_(bool run_pre) {
         for (const auto& kv : transition_weights_) {
             int l = kv.first;
             long w = kv.second;
+            if (w == 0) {
+                erase_weight(l);
+                sels_.erase(std::remove(sels_.begin(), sels_.end(), l), sels_.end());
+                sels_set_.erase(l);
+                sums_.erase(std::remove(sums_.begin(), sums_.end(), l), sums_.end());
+                original_wght_[l] = 0;
+                all_sels_.insert(l);
+                continue;
+            }
             if (!contains_lit(sels_, l)) {
                 sels_.push_back(l);
                 sels_set_.insert(l);
@@ -1407,6 +1416,7 @@ bool RC2StratifiedSolver::compute_(bool run_pre) {
             all_sels_.insert(l);
         }
         transition_weights_.clear();
+        normalize_active_objective_assumptions();
 
         remove_contradictory_objective_assumptions();
 
@@ -1555,6 +1565,14 @@ bool RC2StratifiedSolver::compute(const std::vector<int>& assumptions) {
     for (const auto& kv : transition_weights_) {
         int l = kv.first;
         long w = kv.second;
+        if (w == 0) {
+            erase_weight(l);
+            sels_.erase(std::remove(sels_.begin(), sels_.end(), l), sels_.end());
+            sels_set_.erase(l);
+            sums_.erase(std::remove(sums_.begin(), sums_.end(), l), sums_.end());
+            original_wght_[l] = 0;
+            continue;
+        }
         if (!contains_lit(sels_, l)) {
             sels_.push_back(l);
             sels_set_.insert(l);
@@ -1563,6 +1581,7 @@ bool RC2StratifiedSolver::compute(const std::vector<int>& assumptions) {
         original_wght_[l] = w;
     }
     transition_weights_.clear();
+    normalize_active_objective_assumptions();
 
     remove_contradictory_objective_assumptions();
 
@@ -1745,13 +1764,13 @@ void RC2StratifiedSolver::add_clause(const std::vector<int>& clause, std::option
 
 void RC2StratifiedSolver::set_soft(int lit, long weight) {
     ensure_open("set_soft");
-    if (weight <= 0) {
+    if (weight < 0) {
         throw std::invalid_argument("weight must be positive");
     }
     int lint = map_extlit(lit);
     if (all_sels_.find(lint) != all_sels_.end()) {
         auto it = original_wght_.find(lint);
-        long ow = (it == original_wght_.end()) ? weight : it->second;
+        long ow = (it == original_wght_.end()) ? 0 : it->second;
         if (weight == ow) {
             transition_weights_.erase(lint);
         } else {
@@ -1759,6 +1778,7 @@ void RC2StratifiedSolver::set_soft(int lit, long weight) {
         }
         return;
     }
+    if (weight == 0) return;
     add_clause({lit}, weight);
 }
 
