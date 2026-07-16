@@ -13,6 +13,7 @@
           mpfr
           nushell
           unzip
+          zip
           zlib
         ];
       };
